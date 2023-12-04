@@ -81,7 +81,7 @@ contract APunkForYouAndMe is Ownable {
     uint256 totalWeight = address(this).balance;
 
     //uint256 randomNum = uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao))) % totalWeight;
-    uint randomNum = depositors.length - 1; // Exercise worst case
+    uint randomNum = totalWeight; // Exercise worst case
 
     uint256 cumulativeWeight = 0;
     for (uint256 i = 0; i < depositors.length; i++) {

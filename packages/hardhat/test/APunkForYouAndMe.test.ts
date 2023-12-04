@@ -50,8 +50,8 @@ describe("APunkForYouAndMe", function () {
       
       console.time("Creating wallets");
 
-      const NUM_WALLETS = 20000;
-      const NUM_DRAWINGS = 1;
+      const NUM_WALLETS = 5000;
+      const NUM_DRAWINGS = 10;
 
       const wallets = loadWalletsFromFile('privateKeys.txt', NUM_WALLETS);
       /*
@@ -194,7 +194,10 @@ describe("APunkForYouAndMe", function () {
         winnerCounts[address] = 0;
       }
       for(let i = 0; i < NUM_DRAWINGS; i++) {
-        await raffleContract.connect(selectWinnerCallerWallet).selectWinner({gasPrice: "20000000000"});
+        await raffleContract.connect(selectWinnerCallerWallet).selectWinner({
+          gasPrice: 20_000_000_000,
+          gasLimit: 30_000_000
+        });
         
         const gasToRefund = await raffleContract.gasToRefund();
         console.log("gasToRefund:", formatEther(gasToRefund));
