@@ -10,36 +10,46 @@ interface IPunkContract {
 
 contract APunkForYouAndMe is Ownable {
   event Deposited(address user, uint amount);
-  event Withdrawn(address user, uint amount);
   event WinnerSelected(address winner);
   event PunkPurchased(address buyer, uint punkId);
   event EthClaimed(address addr, uint amount);
 
-  address public punkContract; // TODO Set this
-  
+  struct Deposit {
+    address depositor;
+    uint256 start;
+    uint256 end;
+  }
+
+  address public punksContract;
+
   uint256 public targetBalance;
-  uint256 public totalDeposits;
-  uint256 public remainingBalance;
-  mapping(address => uint256) public deposits;
-  address[] public depositors;
+  uint256 public totalDeposited;
+  uint256 public postPunkPurchasesBalance;
+  Deposit[] public deposits;
+  mapping(address => uint256) public addressesToAmountDeposited;
   address public winner;
-  uint256 purchaseDeadline;
-  bool ownerPurchased;
-  bool winnerPurchased;
+  uint256 public purchaseDeadline;
+  bool public ownerPurchased;
+  bool public winnerPurchased;
   bool public inClaimsMode;
 
-  address public selectWinnerCaller;
-  uint public gasToRefund;
-  
   constructor() {}
+
+  function setPunksContract(address addr) external onlyOwner {
+    punksContract = addr;
+  }
 
   function setTargetBalance(uint _targetBalance) external onlyOwner {
     targetBalance = _targetBalance;
   }
 
-  function getNumDepositors() public view returns (uint num) {
-    return depositors.length;
+  function getNumDeposits() public view returns (uint num) {
+    return deposits.length;
   }
+
+  /*function getNumDepositors() public view returns (uint num) {
+    return depositors.length;
+  }*/
 
   function deposit() public payable {
     // TODO require a minimum donation to eliminate 1 wei spam
@@ -47,74 +57,50 @@ contract APunkForYouAndMe is Ownable {
     //require(address(this).balance < targetBalance, "Target already met");
     require(msg.value > 0, "Deposit amount must be greater than zero.");
 
-    if(deposits[msg.sender] == 0) {
-      depositors.push(msg.sender);
-    }
-    deposits[msg.sender] += msg.value;
-    totalDeposits += msg.value;
-    remainingBalance += msg.value;
-    
+    Deposit memory newDeposit = Deposit(
+      msg.sender,
+      address(this).balance - msg.value,
+      address(this).balance - 1 // If the first depositor sends 5 wei, start and end are 0 and 4.
+    );
+    deposits.push(newDeposit);
+
+    totalDeposited += msg.value;
+    postPunkPurchasesBalance += msg.value;
+    addressesToAmountDeposited[msg.sender] += msg.value;
+
     emit Deposited(msg.sender, msg.value);
   }
 
-  function withdraw(uint256 amount) public {
-    // TODO Make this remove from deposits depositors array
-    require(address(this).balance < targetBalance, "Target already met");
-    require(deposits[msg.sender] >= amount, "Insufficient balance.");
-
-    deposits[msg.sender] -= amount;
-    totalDeposits -= amount;
-    remainingBalance -= amount;
-
-    (bool success,) = msg.sender.call{value: amount}("");
-    if(!success) {
-      revert("Failed to withdraw");
-    }
-    
-    emit Withdrawn(msg.sender, amount);
-  }
-
   function selectWinner() public {
-    uint startingGas = gasleft();
     require(address(this).balance >= targetBalance, "Target not yet reached");
-    //require(winner != address(0x0), "Winner already selected.");
-    uint256 totalWeight = address(this).balance;
 
-    //uint256 randomNum = uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao))) % totalWeight;
-    uint randomNum = totalWeight; // Exercise worst case
+    uint256 randomNum = uint256(
+      keccak256(
+        abi.encodePacked(block.timestamp, block.prevrandao)
+      )
+    ) % address(this).balance;
 
-    uint256 cumulativeWeight = 0;
-    for (uint256 i = 0; i < depositors.length; i++) {
-        cumulativeWeight += deposits[depositors[i]];
-        if (randomNum < cumulativeWeight) {
-            winner = depositors[i];
+    // Use binary search to find the entry where the start and end bound the generated value
+    uint256 low = 0;
+    uint256 high = deposits.length - 1;
+
+    while (low <= high) {
+        uint256 mid = (low + high) / 2;
+        Deposit memory midDeposit = deposits[mid];
+
+        if (randomNum >= midDeposit.start && randomNum <= midDeposit.end) {
+            winner = midDeposit.depositor;
             break;
+        } else if (randomNum < midDeposit.start) {
+            high = mid - 1;
+        } else {
+            low = mid + 1;
         }
     }
 
     purchaseDeadline = block.timestamp + 30 days;
 
     emit WinnerSelected(winner);
-
-    selectWinnerCaller = msg.sender;
-    gasToRefund = (startingGas - gasleft()) * tx.gasprice;
-  }
-
-  function refundSelectWinnerGas() public {
-    require(gasToRefund > 0, "gasToRefund must be greater than 0");
-    require(address(this).balance > gasToRefund, "The contract must have enough ETH to refund the gas");
-    require(selectWinnerCaller != address(0), "The selectWinnerCaller must be set");
-
-    uint _gasToRefund = gasToRefund;
-    gasToRefund = 0;
-    
-    address payable _selectWinnerCaller = payable(selectWinnerCaller);
-    selectWinnerCaller = address(0);
-
-    (bool success,) = _selectWinnerCaller.call{value: _gasToRefund}("");
-    if(!success) {
-      revert("Failed to refund gas");
-    }
   }
 
   function buyPunk(uint punkId, uint amount) public {
@@ -126,12 +112,12 @@ contract APunkForYouAndMe is Ownable {
       revert("Only the owner and the winner can call this function");
     }
     require(block.timestamp < purchaseDeadline, "deadline has passed");
-    require(amount <= totalDeposits/2, "amount exceeds budget");
+    require(amount <= totalDeposited/2, "amount exceeds budget");
 
-    IPunkContract(punkContract).buyPunk{value: amount}(punkId);
-    IPunkContract(punkContract).transferPunk(msg.sender, punkId);
+    IPunkContract(punksContract).buyPunk{value: amount}(punkId);
+    IPunkContract(punksContract).transferPunk(msg.sender, punkId);
 
-    remainingBalance -= amount;
+    postPunkPurchasesBalance -= amount;
 
     if (msg.sender == owner()) {
       ownerPurchased = true;
@@ -164,12 +150,11 @@ contract APunkForYouAndMe is Ownable {
 
   function claim() public {
     require(inClaimsMode, "Not in claims mode");
-    require(deposits[msg.sender] > 0, "No deposits to claim");
+    require(addressesToAmountDeposited[msg.sender] > 0, "No deposit to claim");
     
     // The amount to claim should be the user's proportional share of the remainder relative to the amount they deposited
-    uint256 claimableAmount = (remainingBalance * deposits[msg.sender]) / totalDeposits;
-    deposits[msg.sender] = 0;
-    remainingBalance -= claimableAmount;
+    uint256 claimableAmount = (postPunkPurchasesBalance * addressesToAmountDeposited[msg.sender]) / totalDeposited;
+    addressesToAmountDeposited[msg.sender] = 0;
     (bool success,) = msg.sender.call{value: claimableAmount}("");
     if(!success) {
       revert("Failed to claim");
