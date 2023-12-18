@@ -148,6 +148,9 @@ contract APunkForYouAndMe is Ownable {
     inClaimsMode = true;
   }
 
+  // TODO add a view function to calculate your claim amount
+  // TODO add a sweep function that can be called after the claim period ends
+  // TODO nix the winner's deposit and give it to everyone else
   function claim() public {
     require(inClaimsMode, "Not in claims mode");
     require(addressesToAmountDeposited[msg.sender] > 0, "No deposit to claim");

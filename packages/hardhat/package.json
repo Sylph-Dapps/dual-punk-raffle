@@ -12,10 +12,7 @@
     "lint-staged": "eslint --config ./.eslintrc.json --ignore-path ./.eslintignore",
     "test": "REPORT_GAS=true hardhat test --network hardhat",
     "verify": "hardhat etherscan-verify",
-    "run-stats": "hardhat run scripts/runStats.ts",
-    "save-pngs": "hardhat run scripts/savePngs.ts",
-    "save-svgs": "hardhat run scripts/saveSvgs.ts",
-    "stitch-svgs": "hardhat run scripts/stitchSvgs.ts"
+    "generate-accounts": "hardhat run --show-stack-traces scripts/generateAccounts.ts"
   },
   "devDependencies": {
     "@ethersproject/abi": "^5.7.0",
