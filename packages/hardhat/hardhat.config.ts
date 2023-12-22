@@ -56,7 +56,7 @@ const config: HardhatUserConfig = {
     },
     'hardhat': {
       accounts: {
-        count: 1
+        count: 20
       },
       gasPrice: 20000000000
     },

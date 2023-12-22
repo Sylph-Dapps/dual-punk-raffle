@@ -16,7 +16,7 @@ function chunkArray(arr, maxSize) {
   return toReturn;
 }
 
-function loadWalletsFromFile(filePath, numWalletsToLoad = undefined) {
+function loadWalletsFromFile(filePath: string, numWalletsToLoad: any = undefined) {
   const privateKeys = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
   const selectedPrivateKeys = privateKeys.slice(0, typeof numWalletsToLoad === "undefined" ? privateKeys.length : numWalletsToLoad);
   return selectedPrivateKeys.map(privateKey => {
@@ -25,6 +25,7 @@ function loadWalletsFromFile(filePath, numWalletsToLoad = undefined) {
 }
 
 describe("APunkForYouAndMe", function () {
+  let gasliteDropContract: any;
   let raffleContract: any;
   let punksContract: any;
   let punksReaderContract: any;
@@ -32,25 +33,28 @@ describe("APunkForYouAndMe", function () {
   
   before(async () => {
     owner = (await ethers.getSigners())[0];
+
+    console.time("Deploying GasliteDrop");
+    const gasliteDropContractFactory = await ethers.getContractFactory("GasliteDrop");
+    gasliteDropContract = await gasliteDropContractFactory.deploy();
+    gasliteDropContract.deployed();
+    console.timeEnd("Deploying GasliteDrop");
   })
 
   beforeEach(async () => {
     const cryptoPunksMarketContractFactory = await ethers.getContractFactory("CryptoPunksMarket");
     punksContract = await cryptoPunksMarketContractFactory.deploy()
     await punksContract.deployed();
-    //console.log("punksContract:", punksContract.address);
 
     const cryptoPunksMarketReaderContractFactory = await ethers.getContractFactory("CryptoPunksMarketReader");
     punksReaderContract = await cryptoPunksMarketReaderContractFactory.deploy();
     await punksReaderContract.deployed();
     await punksReaderContract.setPunksContract(punksContract.address);
-    //console.log("punksReaderContract:", punksReaderContract.address);
 
     const raffleContractFactory = await ethers.getContractFactory("APunkForYouAndMe");
     raffleContract = await raffleContractFactory.deploy();
     await raffleContract.deployed();
     await raffleContract.setPunksContract(punksContract.address);
-    //console.log("raffleContract:", raffleContract.address);
   });
 
   describe("setPunksContract", function() {
@@ -142,15 +146,107 @@ describe("APunkForYouAndMe", function () {
     });
   });
 
-  describe.only("getNumDeposits", function() {
-    it.skip("should return the number of deposits when each depositor is unique", async function() {});
-    it.skip("should return the number of deposits when there are duplicates", async function() {});
-    it.skip("should return the number of deposits when they all come from one person", async function() {});
+  describe("getNumDeposits", function() {
+    it("should return the number of deposits when each depositor is unique", async function() {
+      const DEPOSIT_AMOUNT = parseEther("1");
+      
+      const signers = await ethers.getSigners();
+      for(let i = 0; i < signers.length; i++) {
+        const signer = signers[i];
+        const connectedRaffleContract = raffleContract.connect(signer);
+        await connectedRaffleContract.deposit({
+          value: DEPOSIT_AMOUNT,
+          gasLimit: 1_000_000
+        });
+      }
+      
+      const numDeposits = await raffleContract.getNumDeposits();
+      expect(numDeposits).to.equal(signers.length);
+    });
+    it("should return the number of deposits when there are duplicates", async function() {
+      const DEPOSIT_AMOUNT = parseEther("1");
+
+      const signers = await ethers.getSigners();
+      signers.push(signers[0]);
+      signers.push(signers[0]);
+      signers.push(signers[0]);
+      signers.push(signers[1]);
+      signers.push(signers[2]);
+
+      for(let i = 0; i < signers.length; i++) {
+        const signer = signers[i];
+        const connectedRaffleContract = raffleContract.connect(signer);
+        await connectedRaffleContract.deposit({
+          value: DEPOSIT_AMOUNT,
+          gasLimit: 1_000_000
+        });
+      }
+      
+      const numDeposits = await raffleContract.getNumDeposits();
+      expect(numDeposits).to.equal(signers.length);
+    });
+    it("should return the number of deposits when they all come from one person", async function() {
+      const DEPOSIT_AMOUNT = parseEther("1");
+
+      let signers = await ethers.getSigners();
+      signers = [signers[1]];
+      signers = signers.concat(signers).concat(signers).concat(signers);
+
+      for(let i = 0; i < signers.length; i++) {
+        const signer = signers[i];
+        const connectedRaffleContract = raffleContract.connect(signer);
+        await connectedRaffleContract.deposit({
+          value: DEPOSIT_AMOUNT,
+          gasLimit: 1_000_000
+        });
+      }
+      
+      const numDeposits = await raffleContract.getNumDeposits();
+      expect(numDeposits).to.equal(signers.length);
+    });
   });
 
   describe("deposit", function() {
-    it.skip("should update the total amount deposited", async function() {});
-    it.skip("should add an item to the deposits array", async function() {});
+    it("should update the total amount deposited", async function() {
+      const signers = await ethers.getSigners();
+      const depositAmounts = signers.map(signer => {
+        return Math.round(Math.random() * 100_000);
+      });
+
+      let runningTotal = 0;
+      for(let i = 0; i < signers.length; i++) {
+        const signer = signers[i];
+        const depositAmount = depositAmounts[i];
+        const connectedRaffleContract = raffleContract.connect(signer);
+        await connectedRaffleContract.deposit({
+          value: depositAmount,
+          gasLimit: 1_000_000
+        });
+        runningTotal += depositAmount;
+
+        const raffleBalance = await ethers.provider.getBalance(raffleContract.address);
+        expect(raffleBalance).to.equal(runningTotal);
+      }
+    });
+    it("should add an item to the deposits array", async function() {
+      const signers = await ethers.getSigners();
+      const depositAmounts = signers.map(signer => {
+        return Math.round(Math.random() * 100_000);
+      });
+
+      for(let i = 0; i < signers.length; i++) {
+        const signer = signers[i];
+        const depositAmount = depositAmounts[i];
+        const connectedRaffleContract = raffleContract.connect(signer);
+        await connectedRaffleContract.deposit({
+          value: depositAmount,
+          gasLimit: 1_000_000
+        });
+
+        const numDeposits = await raffleContract.getNumDeposits();
+        expect(numDeposits).to.equal(i + 1);
+      }
+    });
     it.skip("should increment the sender's amount deposited", async function() {});
     it.skip("should not be callable after the target balance is reached", async function() {});
     it.skip("should not be callable after selectWinner is called", async function() {});
@@ -244,12 +340,6 @@ describe("APunkForYouAndMe", function () {
       await connectedPunksContract.offerPunkForSale(PUNK_ID_1, PUNK_COST_1);
       await connectedPunksContract.offerPunkForSale(PUNK_ID_2, PUNK_COST_2);
       console.timeEnd("Listing punks for sale");
-
-      console.time("Deploying Gaslite Drop");
-      const gasliteDropContractFactory = await ethers.getContractFactory("GasliteDrop");
-      const gasliteDropContract = await gasliteDropContractFactory.deploy();
-      gasliteDropContract.deployed();
-      console.timeEnd("Deploying Gaslite Drop");
 
       console.time("Creating wallets");
       const wallets = loadWalletsFromFile('privateKeys.txt', NUM_WALLETS);
@@ -463,7 +553,7 @@ describe("APunkForYouAndMe", function () {
       }
 
       const rcb0 = await ethers.provider.getBalance(raffleContract.address);
-      console.log(rcb0.toString());
+      expect(rcb0).to.equal(0);
 
       /*const addresses = Object.keys(winnerCounts);
       for (let i = 0; i < addresses.length; i++) {
