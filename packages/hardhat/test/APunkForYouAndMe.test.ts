@@ -1,11 +1,22 @@
-import { expect } from "chai";
 import * as fs from "fs";
+import { expect } from "chai";
 import { ethers } from "hardhat";
+import { BigNumber } from "ethers";
+import { differenceInDays } from "date-fns";
 
 const {
   parseEther,
   formatEther,
 } = ethers.utils;
+
+
+function loadWalletsFromFile(filePath: string, numWalletsToLoad: any = undefined) {
+  const privateKeys = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
+  const selectedPrivateKeys = privateKeys.slice(0, typeof numWalletsToLoad === "undefined" ? privateKeys.length : numWalletsToLoad);
+  return selectedPrivateKeys.map(privateKey => {
+    return (new ethers.Wallet(privateKey.trim())).connect(ethers.provider);
+  });
+}
 
 function chunkArray(arr, maxSize) {
   const toReturn = [];
@@ -16,13 +27,40 @@ function chunkArray(arr, maxSize) {
   return toReturn;
 }
 
-function loadWalletsFromFile(filePath: string, numWalletsToLoad: any = undefined) {
-  const privateKeys = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
-  const selectedPrivateKeys = privateKeys.slice(0, typeof numWalletsToLoad === "undefined" ? privateKeys.length : numWalletsToLoad);
-  return selectedPrivateKeys.map(privateKey => {
-    return (new ethers.Wallet(privateKey.trim())).connect(ethers.provider);
-  });
+// TODO test this
+function getRandomBigNumber(min, max) {
+  const range = max.sub(min).add(1); // Add 1 to include the max value in the range
+  const randomNumber = BigNumber.from(ethers.utils.randomBytes(32)).mod(range).add(min);
+  return randomNumber;
 }
+
+function bigNumberToDate(bn) {
+  // Solidity returns dates in seconds but the Date constructor wants milliseconds so multiply by 1000 
+  return new Date(bn.toNumber() * 1000);
+}
+
+describe("getRandomBigNumber", () => {
+  it("should return results within range", () => {
+    const counts = {};
+    for(let i = 0; i < 100; i++) {
+      const r = getRandomBigNumber(
+        BigNumber.from(1),
+        BigNumber.from(10)
+      );
+      expect(r).to.be.lessThanOrEqual(10);
+      expect(r).to.be.greaterThanOrEqual(1);
+
+      if(!counts[r.toString()]) {
+        counts[r.toString()] = 0;
+      }
+      counts[r.toString()]++;
+    }
+
+    for(let i = 1; i <= 10; i++) {
+      expect(counts[i.toString()]).to.be.greaterThan(0);
+    }
+  })
+});
 
 describe("APunkForYouAndMe", function () {
   let gasliteDropContract: any;
@@ -34,11 +72,11 @@ describe("APunkForYouAndMe", function () {
   before(async () => {
     owner = (await ethers.getSigners())[0];
 
-    console.time("Deploying GasliteDrop");
+    //console.time("Deploying GasliteDrop");
     const gasliteDropContractFactory = await ethers.getContractFactory("GasliteDrop");
     gasliteDropContract = await gasliteDropContractFactory.deploy();
     gasliteDropContract.deployed();
-    console.timeEnd("Deploying GasliteDrop");
+    //console.timeEnd("Deploying GasliteDrop");
   })
 
   beforeEach(async () => {
@@ -79,7 +117,7 @@ describe("APunkForYouAndMe", function () {
       const contractAddress1 = await connectedRaffleContract.punksContract();
       expect(newAddress).to.not.equal(contractAddress1);
 
-      expect(connectedRaffleContract.setPunksContract(newAddress)).to.eventually.throw();
+      await expect(connectedRaffleContract.setPunksContract(newAddress)).to.eventually.be.rejected;
 
       const contractAddress2 = await raffleContract.punksContract();
       expect(newAddress).to.not.equal(contractAddress2);
@@ -113,12 +151,12 @@ describe("APunkForYouAndMe", function () {
       expect(b0).to.equal(0);
 
       const newTargetBalance = parseEther("1");
-      expect(connectedRaffleContract.setTargetBalance(newTargetBalance)).to.eventually.throw();
+      await expect(connectedRaffleContract.setTargetBalance(newTargetBalance)).to.eventually.be.rejected;
 
       const b1 = await raffleContract.targetBalance();
       expect(b1).to.equal(b0);
     });
-
+    /*
     it("should not be callable after the target balance is reached exactly", async function() { // Maybe it should?
       await raffleContract.setTargetBalance(parseEther("2"));
       await raffleContract.setTargetBalance(parseEther("0.1"));
@@ -127,9 +165,9 @@ describe("APunkForYouAndMe", function () {
         to: raffleContract.address,
         value: parseEther("1")
       });
-      expect(raffleContract.setTargetBalance(parseEther("2"))).to.eventually.throw();
-      expect(raffleContract.setTargetBalance(parseEther("1"))).to.eventually.throw();
-      expect(raffleContract.setTargetBalance(parseEther("0.1"))).to.eventually.throw();
+      await expect(raffleContract.setTargetBalance(parseEther("2"))).to.eventually.be.rejected;
+      await expect(raffleContract.setTargetBalance(parseEther("1"))).to.eventually.be.rejected;
+      await expect(raffleContract.setTargetBalance(parseEther("0.1"))).to.eventually.be.rejected;
     });
 
     it("should not be callable after the target balance is exceeded", async function() { // Maybe it should?
@@ -140,13 +178,18 @@ describe("APunkForYouAndMe", function () {
         to: raffleContract.address,
         value: parseEther("10")
       });
-      expect(raffleContract.setTargetBalance(parseEther("2"))).to.eventually.throw();
-      expect(raffleContract.setTargetBalance(parseEther("1"))).to.eventually.throw();
-      expect(raffleContract.setTargetBalance(parseEther("0.1"))).to.eventually.throw();
+      await expect(raffleContract.setTargetBalance(parseEther("2"))).to.eventually.be.rejected;
+      await expect(raffleContract.setTargetBalance(parseEther("1"))).to.eventually.be.rejected;
+      await expect(raffleContract.setTargetBalance(parseEther("0.1"))).to.eventually.be.rejected;
     });
+    */
   });
 
   describe("getNumDeposits", function() {
+    beforeEach(async () => {
+      await raffleContract.setTargetBalance(parseEther("100"));
+    });
+
     it("should return the number of deposits when each depositor is unique", async function() {
       const DEPOSIT_AMOUNT = parseEther("1");
       
@@ -207,13 +250,20 @@ describe("APunkForYouAndMe", function () {
   });
 
   describe("deposit", function() {
+    beforeEach(async () => {
+      await raffleContract.setTargetBalance(parseEther("250"));
+    });
+
     it("should update the total amount deposited", async function() {
       const signers = await ethers.getSigners();
       const depositAmounts = signers.map(signer => {
-        return Math.round(Math.random() * 100_000);
+        return getRandomBigNumber(
+          parseEther("0.0001"),
+          parseEther("1")
+        );
       });
 
-      let runningTotal = 0;
+      let runningTotal = BigNumber.from(0);
       for(let i = 0; i < signers.length; i++) {
         const signer = signers[i];
         const depositAmount = depositAmounts[i];
@@ -222,7 +272,7 @@ describe("APunkForYouAndMe", function () {
           value: depositAmount,
           gasLimit: 1_000_000
         });
-        runningTotal += depositAmount;
+        runningTotal = runningTotal.add(depositAmount);
 
         const raffleBalance = await ethers.provider.getBalance(raffleContract.address);
         expect(raffleBalance).to.equal(runningTotal);
@@ -231,43 +281,359 @@ describe("APunkForYouAndMe", function () {
     it("should add an item to the deposits array", async function() {
       const signers = await ethers.getSigners();
       const depositAmounts = signers.map(signer => {
-        return Math.round(Math.random() * 100_000);
+        return getRandomBigNumber(
+          parseEther("0.0001"),
+          parseEther("2")
+        );
       });
 
-      for(let i = 0; i < signers.length; i++) {
-        const signer = signers[i];
-        const depositAmount = depositAmounts[i];
-        const connectedRaffleContract = raffleContract.connect(signer);
-        await connectedRaffleContract.deposit({
-          value: depositAmount,
-          gasLimit: 1_000_000
-        });
-
-        const numDeposits = await raffleContract.getNumDeposits();
-        expect(numDeposits).to.equal(i + 1);
+      for(let j = 0; j < 5; j++) {
+        for(let i = 0; i < signers.length; i++) {
+          const signer = signers[i];
+          const depositAmount = depositAmounts[i];
+          const connectedRaffleContract = raffleContract.connect(signer);
+          await connectedRaffleContract.deposit({
+            value: depositAmount,
+            gasLimit: 1_000_000
+          });
+  
+          const numDeposits = await raffleContract.getNumDeposits();
+          expect(numDeposits).to.equal((i + 1) + (j * (signers.length)));
+        }
       }
     });
-    it.skip("should increment the sender's amount deposited", async function() {});
-    it.skip("should not be callable after the target balance is reached", async function() {});
-    it.skip("should not be callable after selectWinner is called", async function() {});
-    it.skip("should reject sends less than a certain amount", async function() {});
-    it.skip("should only allow EOAs to send", async function() {});
+    it("should increment the sender's amount deposited", async function() {
+      const signers = await ethers.getSigners();
+      const depositAmounts = signers.map(signer => {
+        return getRandomBigNumber(
+          parseEther("0.0001"),
+          parseEther("0.1")
+        );
+      });
+
+      for(let j = 0; j < 5; j++) {
+        for(let i = 0; i < signers.length; i++) {
+          const signer = signers[i];
+          const depositAmount = depositAmounts[i];
+          const connectedRaffleContract = raffleContract.connect(signer);
+          await connectedRaffleContract.deposit({
+            value: depositAmount,
+            gasLimit: 1_000_000
+          });
+  
+          const amountDeposited = await raffleContract.getAmountDeposited(signer.address);
+          expect(amountDeposited).to.equal(depositAmounts[i].mul((j + 1)));
+        }
+      }
+    });
+    it("should not be callable after the target balance is reached", async function() {
+      // TOOD Maybe it should stay open until someone calls a function to close it?
+      await raffleContract.deposit({
+        value: parseEther("249"),
+        gasLimit: 1_000_000
+      });
+      await raffleContract.deposit({
+        value: parseEther("10"),
+        gasLimit: 1_000_000
+      });
+      await expect(raffleContract.deposit({
+        value: parseEther("0.01"),
+        gasLimit: 1_000_000
+      })).to.eventually.be.rejected;
+    });
+    it("should reject sends less than a certain amount", async function() {
+      await expect(raffleContract.deposit({
+        value: parseEther("0.000001"),
+        gasLimit: 1_000_000
+      })).to.eventually.be.rejected;
+    });
+    it("should only allow EOAs to send", async function() {
+      // Fail using GaslightDrop
+      await expect(
+        gasliteDropContract.airdropETH(
+          [raffleContract.address],
+          [parseEther("1")],
+          {
+            value: parseEther("1"),
+            gasLimit: 30_000_000,
+          }
+        )
+      ).to.eventually.be.rejected;
+
+      // Fail using a custom contract
+      const etherForwarderContractFactory = await ethers.getContractFactory("EtherForwarder");
+      const etherForwarderContract = await etherForwarderContractFactory.deploy();
+      await etherForwarderContract.deployed();
+      
+      // Make sure sending to a non-raffle contract works
+      await etherForwarderContract.setAddress(owner.address);
+      await etherForwarderContract.send({
+        value: parseEther("1")
+      });
+
+      // Fail using the EtherForwarder
+      await etherForwarderContract.setAddress(raffleContract.address);
+      await expect(
+        etherForwarderContract.send({
+          value: parseEther("1")
+        })
+      ).to.eventually.be.rejected;
+    });
+    it("should not be callable after selectWinner is called", async function() {
+      await raffleContract.deposit({
+        value: parseEther("250"),
+        gasLimit: 1_000_000
+      });
+      await raffleContract.selectWinner();
+
+      await expect(
+        // TODO this call will fail both because the winner is set and because the target has been reached.
+        // Consider having the winner and owner buy punks and potentially entering claimsMode before calling
+        // this so the balance will be less.
+        raffleContract.deposit({
+          value: parseEther("250"),
+          gasLimit: 1_000_000
+        })
+      ).to.eventually.be.rejected;
+    });
   });
 
   describe("selectWinner", function() {
-    it.skip("should not be callable until the target balance is reached", async function() {});
-    it.skip("should update the winner to be one of the depositors", async function() {});
-    it.skip("should set the purchaseDeadline to be 30 days out", async function() {});
-    it.skip("should be callable by anyone but only once per contract iteration", async function() {});
-    it.skip("should pick every depositor at least once after some number of contract iterations", async function() {});
-    it.skip("should prevent future deposits", async function() {});
+    it("should not be callable until the target balance is reached", async function() {
+      await raffleContract.setTargetBalance(parseEther("3"));
+      await expect(raffleContract.selectWinner()).to.eventually.be.rejected;
+      await raffleContract.deposit({
+        value: parseEther("1")
+      });
+      await expect(raffleContract.selectWinner()).to.eventually.be.rejected;
+
+      // Different way to deposit
+      await owner.sendTransaction({
+        to: raffleContract.address,
+        value: parseEther("1")
+      });
+      await expect(raffleContract.selectWinner()).to.eventually.be.rejected;
+
+      await owner.sendTransaction({
+        to: raffleContract.address,
+        value: parseEther("1")
+      });
+      await raffleContract.selectWinner();
+    });
+    it("should update the winner to be one of the depositors", async function() {
+      await raffleContract.setTargetBalance(parseEther("3"));
+      await raffleContract.deposit({
+        value: parseEther("3")
+      });
+      await raffleContract.selectWinner();
+      const winner = await raffleContract.winner();
+      expect(winner).to.equal(owner.address);
+    });
+    it("should set the purchaseDeadline to be 30 days out", async function() { // TODO Decide how long to actually set the purchaseDeadline
+      await raffleContract.setTargetBalance(parseEther("3"));
+      await raffleContract.deposit({
+        value: parseEther("3")
+      });
+      await raffleContract.selectWinner();
+      const purchaseDeadline = bigNumberToDate(await raffleContract.purchaseDeadline());
+      const difference = differenceInDays(purchaseDeadline, new Date);
+      expect(difference).to.equal(30);
+    });
+    it("should be callable by anyone but only once per contract iteraction", async function() {
+      // There are other tests that call selectWinner using the deployer address,
+      // so this one tests using another address.
+      let selectWinnerCallerWallet = ethers.Wallet.createRandom();
+      selectWinnerCallerWallet =  selectWinnerCallerWallet.connect(ethers.provider);
+      await owner.sendTransaction({
+        to: selectWinnerCallerWallet.address,
+        value: parseEther("2")
+      });
+
+      await raffleContract.setTargetBalance(parseEther("1"));
+      await raffleContract.connect(selectWinnerCallerWallet).deposit({
+        value: parseEther("1")
+      });
+      await raffleContract.connect(selectWinnerCallerWallet).selectWinner();
+      const winner = await raffleContract.winner();
+      expect(winner).to.equal(selectWinnerCallerWallet.address);
+    });
+    it("should prevent future deposits and changing of the target balance", async function() {
+      await raffleContract.setTargetBalance(parseEther("1"));
+      await raffleContract.deposit({
+        value: parseEther("1")
+      });
+      await raffleContract.selectWinner();
+      await expect(
+        raffleContract.deposit({
+          value: parseEther("1")
+        })
+      ).to.eventually.be.rejected;
+
+      await expect(
+        raffleContract.setTargetBalance(parseEther("2"))
+      ).to.eventually.be.rejected;
+    });
   });
 
   describe("buyPunk", function() {
-    it.skip("should be callable once by the owner and get them a punk", async function() {});
-    it.skip("should be callable once by the winner and get them a punk", async function() {});
-    it.skip("should not be callable by anyone else", async function() {});
-    it.skip("should only allow the caller to use up to half the balance of the contract", async function() {});
+    const NUM_WALLETS = 5;
+    const NUM_DEPOSITS_PER_WALLET = 4;
+    const wallets = loadWalletsFromFile('privateKeys.txt', NUM_WALLETS);
+    const punkHolder = ethers.Wallet.createRandom().connect(ethers.provider);
+
+    before(async function() {
+      // Send each wallet initial funds
+      for(let i = 0; i < wallets.length; i++) {
+        await owner.sendTransaction({
+          to: wallets[i].address,
+          value: parseEther("50")
+        });
+      }
+
+      // Give punkHolder some ETH 
+      await owner.sendTransaction({
+        to: punkHolder.address,
+        value: parseEther("1")
+      });
+    })
+
+    beforeEach(async function() {
+      // Give the punkHolder the punks
+      await punksContract.setInitialOwners(
+        Array.from({ length: 100 }, () => punkHolder.address),
+        Array.from({ length: 100 }, (_, index) => index)
+      );
+      await punksContract.allInitialOwnersAssigned();
+      
+      // Set the target balance for the raffle
+      await raffleContract.setTargetBalance(parseEther((NUM_WALLETS * NUM_DEPOSITS_PER_WALLET).toString()));
+      
+      // Make raffle entries
+      for(let i = 0; i < NUM_DEPOSITS_PER_WALLET; i++) {
+        for(let j = 0; j < NUM_WALLETS; j++) {
+          await raffleContract.connect(wallets[i]).deposit({
+            value: parseEther("1")
+          });
+        }
+      }
+
+      // Pick winner
+      await raffleContract.selectWinner();
+    });
+
+    it("should be callable once by the owner and get them a punk", async function() {
+      const PUNK_COST = parseEther("4");
+      await punksContract.connect(punkHolder).offerPunkForSale(0, PUNK_COST);
+
+      expect(
+        await punksReaderContract.callStatic.ownerOf(0)
+      ).to.equal(punkHolder.address);
+      expect(
+        await raffleContract.ownerPurchased()
+      ).to.be.false;
+      await raffleContract.buyPunk(0, PUNK_COST);
+      expect(
+        await punksReaderContract.callStatic.ownerOf(0)
+      ).to.equal(owner.address);
+      expect(
+        await raffleContract.ownerPurchased()
+      ).to.be.true;
+      
+      // Can't buy a second punk
+      punksContract.connect(punkHolder).offerPunkForSale(1, PUNK_COST)
+      await expect(
+        raffleContract.buyPunk(1, PUNK_COST)
+      ).to.eventually.be.rejected;
+    });
+    it("should be callable once by the winner and get them a punk", async function() {
+      const PUNK_COST = parseEther("4");
+      await punksContract.connect(punkHolder).offerPunkForSale(0, PUNK_COST);
+
+      const winnerAddress = await raffleContract.winner();
+      const winner = wallets.find(w => w.address === winnerAddress);
+      expect(
+        await punksReaderContract.callStatic.ownerOf(0)
+      ).to.equal(punkHolder.address);
+      expect(
+        await raffleContract.ownerPurchased()
+      ).to.be.false;
+      await raffleContract.connect(winner).buyPunk(0, PUNK_COST);
+      expect(
+        await punksReaderContract.callStatic.ownerOf(0)
+      ).to.equal(winner.address);
+      expect(
+        await raffleContract.winnerPurchased()
+      ).to.be.true;
+      
+      // Can't buy a second punk
+      punksContract.connect(punkHolder).offerPunkForSale(1, PUNK_COST)
+      await expect(
+        raffleContract.connect(winner).buyPunk(1, PUNK_COST)
+      ).to.eventually.be.rejected;
+    });
+    it("should not be callable by anyone else", async function() {
+      const PUNK_COST = parseEther("1");
+      await punksContract.connect(punkHolder).offerPunkForSale(0, PUNK_COST);
+      await punksContract.connect(punkHolder).offerPunkForSale(1, PUNK_COST);
+      await punksContract.connect(punkHolder).offerPunkForSale(2, PUNK_COST);
+
+      const winnerAddress = await raffleContract.winner();
+      const winner = wallets.find(w => w.address === winnerAddress);
+
+      // Try to buy for everyone else other than the winner;
+      for(let i = 0; i < wallets.length; i++) {
+        const wallet = wallets[i];
+        if(wallet.address === winnerAddress) {
+          continue;
+        }
+
+        await expect(
+          raffleContract.connect(wallet).buyPunk(0, PUNK_COST)
+        ).to.eventually.be.rejected;
+      }
+
+      // Buy the punks for the owner and winner
+      await raffleContract.buyPunk(0, PUNK_COST);
+      await raffleContract.connect(winner).buyPunk(1, PUNK_COST);
+
+      // ... and try to buy for everyone else again
+      for(let i = 0; i < wallets.length; i++) {
+        const wallet = wallets[i];
+        if(wallet.address === winnerAddress) {
+          continue;
+        }
+
+        await expect(
+          raffleContract.connect(wallet).buyPunk(2, PUNK_COST)
+        ).to.eventually.be.rejected;
+      }
+    });
+    it("should only allow the caller to use up to half the balance of the contract", async function() {
+      await punksContract.connect(punkHolder).offerPunkForSale(0, parseEther("11"));
+      expect(
+        raffleContract.buyPunk(0, parseEther("11"))
+      ).to.eventually.throw();
+      await punksContract.connect(punkHolder).offerPunkForSale(0, parseEther("10"));
+      await raffleContract.buyPunk(0, parseEther("10"));
+      expect(
+        await punksReaderContract.callStatic.ownerOf(0)
+      ).to.equal(owner.address);
+
+      const winnerAddress = await raffleContract.winner();
+      const winner = wallets.find(w => w.address === winnerAddress);
+      await punksContract.connect(punkHolder).offerPunkForSale(1, parseEther("20"));
+      await expect(
+        raffleContract.connect(winner).buyPunk(1, parseEther("10"))
+      ).to.eventually.be.rejected;
+      await expect(
+        raffleContract.connect(winner).buyPunk(1, parseEther("20"))
+      ).to.eventually.be.rejected;
+      await punksContract.connect(punkHolder).offerPunkForSale(1, parseEther("5"));
+      await raffleContract.connect(winner).buyPunk(1, parseEther("10"));
+      expect(
+        await punksReaderContract.callStatic.ownerOf(1)
+      ).to.equal(winner.address);
+    });
     it.skip("should not be callable after the purchase deadline", async function() {});
     
     // TODO Maybe remove this?
@@ -275,7 +641,14 @@ describe("APunkForYouAndMe", function () {
   });
 
   describe("enterClaimsMode", function() {
-    it.skip("should be callable by the owner before the targetBalance is reached", async function() {});
+    it("should be callable by the owner before the targetBalance is reached", async function() {
+      let inClaimsMode;
+      inClaimsMode = await raffleContract.inClaimsMode();
+      expect(inClaimsMode).to.be.false;
+      await raffleContract.enterClaimsMode();
+      inClaimsMode = await raffleContract.inClaimsMode();
+      expect(inClaimsMode).to.be.true;
+    });
     it.skip("should not be callable by anyone after targetBalance is reached but before the purchase deadline passes", async function() {});
     it.skip("should be callable by anyone if the owner misses the deadline", async function() {});
     it.skip("should be callable by anyone if the winner misses the deadline", async function() {});
@@ -334,7 +707,7 @@ describe("APunkForYouAndMe", function () {
         await punksReaderContract.callStatic.ownerOf(1)
       ).to.equal(punkHolder.address);
       console.timeEnd("Assigning punks");
-      
+
       console.time("Listing punks for sale");
       const connectedPunksContract = punksContract.connect(punkHolder);
       await connectedPunksContract.offerPunkForSale(PUNK_ID_1, PUNK_COST_1);
@@ -560,6 +933,74 @@ describe("APunkForYouAndMe", function () {
         const address = addresses[i];
         expect(winnerCounts[address] > 0, `${address} never won :(`).to.be.true;
       }*/
+    });
+  });
+});
+
+describe("APunkForYouAndMe - Multiple iterations", function() {
+  describe("buyPunk", async function() {
+    it("should pick every depositor at least once", async function() {
+      const NUM_ITERATIONS = 30;
+      const NUM_WALLETS = 5;
+      
+      const owner = (await ethers.getSigners())[0];
+      
+      const punkHolder = ethers.Wallet.createRandom().connect(ethers.provider);
+      await owner.sendTransaction({
+        to: punkHolder.address,
+        value: parseEther("1")
+      });
+
+      const wallets = loadWalletsFromFile('privateKeys.txt', NUM_WALLETS);
+      for(let i = 0; i < wallets.length; i++) {
+        await owner.sendTransaction({
+          to: wallets[i].address,
+          value: parseEther((NUM_ITERATIONS + 1).toString())
+        });
+      }
+
+      const winCounts = {};
+      wallets.forEach(w => winCounts[w.address] = 0);
+
+      const cryptoPunksMarketContractFactory = await ethers.getContractFactory("CryptoPunksMarket");
+      const punksContract = await cryptoPunksMarketContractFactory.deploy();
+      await punksContract.deployed();
+    
+      const cryptoPunksMarketReaderContractFactory = await ethers.getContractFactory("CryptoPunksMarketReader");
+      const punksReaderContract = await cryptoPunksMarketReaderContractFactory.deploy();
+      await punksReaderContract.deployed();
+      await punksReaderContract.setPunksContract(punksContract.address);
+
+      await punksContract.setInitialOwners(
+        Array.from({ length: 100 }, () => punkHolder.address),
+        Array.from({ length: 100 }, (_, index) => index)
+      );
+      await punksContract.allInitialOwnersAssigned();
+
+      for(let i = 0; i < NUM_ITERATIONS; i++) {
+        // Deploy raffle contract
+        const raffleContractFactory = await ethers.getContractFactory("APunkForYouAndMe");
+        const raffleContract = await raffleContractFactory.deploy();
+        await raffleContract.deployed();
+        await raffleContract.setPunksContract(punksContract.address);
+        await raffleContract.setTargetBalance(parseEther(NUM_WALLETS.toString()));
+
+        // Make raffle entries
+        for(let j = 0; j < NUM_WALLETS; j++) {
+          await raffleContract.connect(wallets[j]).deposit({
+            value: parseEther("1")
+          });
+        }
+
+        // Pick winner
+        await raffleContract.selectWinner();
+        const winnerAddress = await raffleContract.winner();
+        winCounts[winnerAddress]++;
+      }
+
+      for(let i = 0; i < wallets.length; i++) {
+        expect(winCounts[wallets[i].address]).greaterThan(0);
+      }
     });
   });
 });

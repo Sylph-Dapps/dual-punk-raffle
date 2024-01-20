@@ -48,6 +48,7 @@
   "dependencies": {
     "@openzeppelin/contracts": "^4.9.1",
     "base64-sol": "^1.1.0",
+    "date-fns": "^3.2.0",
     "dotenv": "^16.0.3",
     "envfile": "^6.18.0",
     "erc721a": "^4.2.3",

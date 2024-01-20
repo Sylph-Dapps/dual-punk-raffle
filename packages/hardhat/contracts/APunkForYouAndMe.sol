@@ -40,6 +40,7 @@ contract APunkForYouAndMe is Ownable {
   }
 
   function setTargetBalance(uint _targetBalance) external onlyOwner {
+    require(winner == address(0x0));
     targetBalance = _targetBalance;
   }
 
@@ -47,15 +48,19 @@ contract APunkForYouAndMe is Ownable {
     return deposits.length;
   }
 
+  function getAmountDeposited(address addr) public view returns (uint num) {
+    return addressesToAmountDeposited[addr];
+  }
+
   /*function getNumDepositors() public view returns (uint num) {
     return depositors.length;
   }*/
 
   function deposit() public payable {
-    // TODO require a minimum donation to eliminate 1 wei spam
     require(msg.sender == tx.origin, "Only EOAs");
-    //require(address(this).balance < targetBalance, "Target already met");
-    require(msg.value > 0, "Deposit amount must be greater than zero.");
+    require(msg.value > 0.0001 ether, "Don't be cheap!");
+    require(address(this).balance - msg.value < targetBalance, "Target already met");
+    require(winner == address(0x0), "Winner already selected");
 
     Deposit memory newDeposit = Deposit(
       msg.sender,
@@ -73,6 +78,7 @@ contract APunkForYouAndMe is Ownable {
 
   function selectWinner() public {
     require(address(this).balance >= targetBalance, "Target not yet reached");
+    require(winner == address(0x0), "Winner has already been selected");
 
     uint256 randomNum = uint256(
       keccak256(
