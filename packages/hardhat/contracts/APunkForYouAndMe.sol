@@ -40,7 +40,7 @@ contract APunkForYouAndMe is Ownable {
   }
 
   function setTargetBalance(uint _targetBalance) external onlyOwner {
-    require(winner == address(0x0));
+    require(winner == address(0));
     targetBalance = _targetBalance;
   }
 
@@ -60,7 +60,7 @@ contract APunkForYouAndMe is Ownable {
     require(msg.sender == tx.origin, "Only EOAs");
     require(msg.value > 0.0001 ether, "Don't be cheap!");
     require(address(this).balance - msg.value < targetBalance, "Target already met");
-    require(winner == address(0x0), "Winner already selected");
+    require(winner == address(0), "Winner already selected");
 
     Deposit memory newDeposit = Deposit(
       msg.sender,
@@ -78,7 +78,7 @@ contract APunkForYouAndMe is Ownable {
 
   function selectWinner() public {
     require(address(this).balance >= targetBalance, "Target not yet reached");
-    require(winner == address(0x0), "Winner has already been selected");
+    require(winner == address(0), "Winner has already been selected");
 
     uint256 randomNum = uint256(
       keccak256(
@@ -131,23 +131,19 @@ contract APunkForYouAndMe is Ownable {
       winnerPurchased = true;
     }
 
-    if (ownerPurchased && winnerPurchased) {
-      enterClaimsMode();
-    }
-
     emit PunkPurchased(msg.sender, punkId);
   }
 
   function enterClaimsMode() public {
     require(
       // The owner can call the whole thing off before the winner has been drawn.
-      (msg.sender == owner() && winner != address(0x0)) ||
+      (msg.sender == owner() && winner == address(0)) ||
 
       // Anyone can trigger claims mode if both the owner and winner have bought their punks...
       (ownerPurchased && winnerPurchased) ||
 
-      // ...or if the purchase deadline has passed.
-      (block.timestamp > purchaseDeadline),
+      // ...or if the purchase deadline is set and has passed.
+      (purchaseDeadline != 0 && block.timestamp > purchaseDeadline),
 
       "Claims mode cannot be started yet"
     );

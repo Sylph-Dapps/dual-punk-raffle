@@ -9,6 +9,11 @@ const {
   formatEther,
 } = ethers.utils;
 
+const SECOND = 1;
+const MINUTE = SECOND * 60;
+const HOUR = MINUTE * 60;
+const DAY = HOUR * 24;
+const BEYOND_DEADLINE = DAY * 60; // Deadling is 30 days
 
 function loadWalletsFromFile(filePath: string, numWalletsToLoad: any = undefined) {
   const privateKeys = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
@@ -34,9 +39,14 @@ function getRandomBigNumber(min, max) {
   return randomNumber;
 }
 
-function bigNumberToDate(bn) {
-  // Solidity returns dates in seconds but the Date constructor wants milliseconds so multiply by 1000 
-  return new Date(bn.toNumber() * 1000);
+// Solidity returns dates in seconds but the Date constructor wants milliseconds so multiply by 1000 
+function solidityDateToJS(num) {
+  if(typeof num === 'number') {
+    return new Date(num * 1000);
+  } else {
+    // It's a BigNumber
+    return new Date(num.toNumber() * 1000);
+  }
 }
 
 describe("getRandomBigNumber", () => {
@@ -435,7 +445,7 @@ describe("APunkForYouAndMe", function () {
         value: parseEther("3")
       });
       await raffleContract.selectWinner();
-      const purchaseDeadline = bigNumberToDate(await raffleContract.purchaseDeadline());
+      const purchaseDeadline = solidityDateToJS(await raffleContract.purchaseDeadline());
       const difference = differenceInDays(purchaseDeadline, new Date);
       expect(difference).to.equal(30);
     });
@@ -610,9 +620,9 @@ describe("APunkForYouAndMe", function () {
     });
     it("should only allow the caller to use up to half the balance of the contract", async function() {
       await punksContract.connect(punkHolder).offerPunkForSale(0, parseEther("11"));
-      expect(
+      await expect(
         raffleContract.buyPunk(0, parseEther("11"))
-      ).to.eventually.throw();
+      ).to.eventually.be.rejected;
       await punksContract.connect(punkHolder).offerPunkForSale(0, parseEther("10"));
       await raffleContract.buyPunk(0, parseEther("10"));
       expect(
@@ -634,13 +644,32 @@ describe("APunkForYouAndMe", function () {
         await punksReaderContract.callStatic.ownerOf(1)
       ).to.equal(winner.address);
     });
-    it.skip("should not be callable after the purchase deadline", async function() {});
-    
-    // TODO Maybe remove this?
-    //it.skip("should trigger claims mode after being called by both the owner and the winner", async function() {});
+    it("should not be callable after the purchase deadline", async function() {
+      const winnerAddress = await raffleContract.winner();
+      const winner = wallets.find(w => w.address === winnerAddress);
+
+      await punksContract.connect(punkHolder).offerPunkForSale(0, parseEther("1"));
+      await punksContract.connect(punkHolder).offerPunkForSale(1, parseEther("1"));
+      
+      await ethers.provider.send("evm_increaseTime", [BEYOND_DEADLINE]);
+      await ethers.provider.send("evm_mine");
+
+      await expect(
+        raffleContract.buyPunk(0, parseEther("1"))
+      ).to.eventually.be.rejected;
+      await expect(
+        raffleContract.connect(winner).buyPunk(1, parseEther("1"))
+      ).to.eventually.be.rejected;
+    });
   });
 
   describe("enterClaimsMode", function() {
+    let nonOwner;
+
+    before(async function() {
+      nonOwner = (await ethers.getSigners())[1];
+    });
+
     it("should be callable by the owner before the targetBalance is reached", async function() {
       let inClaimsMode;
       inClaimsMode = await raffleContract.inClaimsMode();
@@ -649,10 +678,159 @@ describe("APunkForYouAndMe", function () {
       inClaimsMode = await raffleContract.inClaimsMode();
       expect(inClaimsMode).to.be.true;
     });
-    it.skip("should not be callable by anyone after targetBalance is reached but before the purchase deadline passes", async function() {});
-    it.skip("should be callable by anyone if the owner misses the deadline", async function() {});
-    it.skip("should be callable by anyone if the winner misses the deadline", async function() {});
-    it.skip("should be callable by anyone once the owner and winner have purchased punks", async function() {});
+    it("should be callable by the owner before the winner is selected", async function() {
+      await raffleContract.setTargetBalance(parseEther("3"));
+      await raffleContract.connect(nonOwner).deposit({
+        value: parseEther("3")
+      });
+
+      let inClaimsMode;
+      inClaimsMode = await raffleContract.inClaimsMode();
+      expect(inClaimsMode).to.be.false;
+      await raffleContract.enterClaimsMode();
+      inClaimsMode = await raffleContract.inClaimsMode();
+      expect(inClaimsMode).to.be.true;
+    });
+    it("should not be callable by anyone other than the owner before the targetBalance is reached", async function() {
+      let inClaimsMode;
+      inClaimsMode = await raffleContract.inClaimsMode();
+      expect(inClaimsMode).to.be.false;
+      await expect(raffleContract.connect(nonOwner).enterClaimsMode()).to.eventually.be.rejected;
+      inClaimsMode = await raffleContract.inClaimsMode();
+      expect(inClaimsMode).to.be.false;
+    });
+    it("should not be callable by anyone after the winner is picked but before punks are purchased or the deadline passes", async function() {
+      await raffleContract.setTargetBalance(parseEther("3"));
+      await raffleContract.connect(nonOwner).deposit({
+        value: parseEther("3")
+      });
+      await raffleContract.selectWinner();
+
+      let inClaimsMode;
+      inClaimsMode = await raffleContract.inClaimsMode();
+      expect(inClaimsMode).to.be.false;
+
+      await expect(raffleContract.connect(nonOwner).enterClaimsMode()).to.eventually.be.rejected;
+      inClaimsMode = await raffleContract.inClaimsMode();
+      expect(inClaimsMode).to.be.false;
+
+      await expect(raffleContract.enterClaimsMode()).to.eventually.be.rejected;
+      inClaimsMode = await raffleContract.inClaimsMode();
+      expect(inClaimsMode).to.be.false;
+
+      /*
+      const t0 = solidityDateToJS((await ethers.provider.getBlock('latest')).timestamp);
+      await ethers.provider.send("evm_increaseTime", [DEFINITELY_BEYOND_DEADLINE]);
+      await ethers.provider.send("evm_mine");
+      const t1 = solidityDateToJS((await ethers.provider.getBlock('latest')).timestamp);
+      console.log({t0, t1});
+      */
+      await ethers.provider.send("evm_increaseTime", [BEYOND_DEADLINE]);
+      await ethers.provider.send("evm_mine");
+      await raffleContract.connect(nonOwner).enterClaimsMode();
+      inClaimsMode = await raffleContract.inClaimsMode();
+      expect(inClaimsMode).to.be.true;
+    });
+    it("should be callable by anyone if the owner misses the deadline", async function() {
+      const PUNK_COST = parseEther("1.5");
+      const punkHolder = ethers.Wallet.createRandom().connect(ethers.provider);
+      await owner.sendTransaction({
+        to: punkHolder.address,
+        value: parseEther("1")
+      });
+      await punksContract.setInitialOwners(
+        Array.from({ length: 100 }, () => punkHolder.address),
+        Array.from({ length: 100 }, (_, index) => index)
+      );
+      await punksContract.allInitialOwnersAssigned();
+      await punksContract.connect(punkHolder).offerPunkForSale(0, PUNK_COST);
+
+      await raffleContract.setTargetBalance(parseEther("3"));
+      await raffleContract.connect(nonOwner).deposit({
+        value: parseEther("3")
+      });
+      await raffleContract.selectWinner();
+      
+      // Winner buys punk but owner does not
+      await raffleContract.connect(nonOwner).buyPunk(0, PUNK_COST);
+      expect(
+        await punksReaderContract.callStatic.ownerOf(0)
+      ).to.equal(nonOwner.address);
+
+      await ethers.provider.send("evm_increaseTime", [BEYOND_DEADLINE]);
+      await ethers.provider.send("evm_mine");
+      expect(await raffleContract.inClaimsMode()).to.be.false;
+      await raffleContract.connect(nonOwner).enterClaimsMode();
+      expect(await raffleContract.inClaimsMode()).to.be.true;
+    });
+    it("should be callable by anyone if the winner misses the deadline", async function() {
+      const PUNK_COST = parseEther("1.5");
+      const punkHolder = ethers.Wallet.createRandom().connect(ethers.provider);
+      await owner.sendTransaction({
+        to: punkHolder.address,
+        value: parseEther("1")
+      });
+      await punksContract.setInitialOwners(
+        Array.from({ length: 100 }, () => punkHolder.address),
+        Array.from({ length: 100 }, (_, index) => index)
+      );
+      await punksContract.allInitialOwnersAssigned();
+      await punksContract.connect(punkHolder).offerPunkForSale(0, PUNK_COST);
+
+      await raffleContract.setTargetBalance(parseEther("3"));
+      await raffleContract.connect(nonOwner).deposit({
+        value: parseEther("3")
+      });
+      await raffleContract.selectWinner();
+      
+      // Owner buys punk but winner does not
+      await raffleContract.buyPunk(0, PUNK_COST);
+      expect(
+        await punksReaderContract.callStatic.ownerOf(0)
+      ).to.equal(owner.address);
+
+      await ethers.provider.send("evm_increaseTime", [BEYOND_DEADLINE]);
+      await ethers.provider.send("evm_mine");
+      expect(await raffleContract.inClaimsMode()).to.be.false;
+      await raffleContract.connect(nonOwner).enterClaimsMode();
+      expect(await raffleContract.inClaimsMode()).to.be.true;
+    });
+    it("should be callable by anyone once the owner and winner have purchased punks", async function() {
+      const PUNK_COST = parseEther("1.5");
+      const punkHolder = ethers.Wallet.createRandom().connect(ethers.provider);
+      await owner.sendTransaction({
+        to: punkHolder.address,
+        value: parseEther("1")
+      });
+      await punksContract.setInitialOwners(
+        Array.from({ length: 100 }, () => punkHolder.address),
+        Array.from({ length: 100 }, (_, index) => index)
+      );
+      await punksContract.allInitialOwnersAssigned();
+      await punksContract.connect(punkHolder).offerPunkForSale(0, PUNK_COST);
+      await punksContract.connect(punkHolder).offerPunkForSale(1, PUNK_COST);
+
+      const winner = (await ethers.getSigners())[2];
+      await raffleContract.setTargetBalance(parseEther("3"));
+      await raffleContract.connect(winner).deposit({
+        value: parseEther("3")
+      });
+      await raffleContract.selectWinner();
+      
+      await raffleContract.buyPunk(0, PUNK_COST);
+      expect(
+        await punksReaderContract.callStatic.ownerOf(0)
+      ).to.equal(owner.address);
+
+      await raffleContract.connect(winner).buyPunk(1, PUNK_COST);
+      expect(
+        await punksReaderContract.callStatic.ownerOf(1)
+      ).to.equal(winner.address);
+
+      expect(await raffleContract.inClaimsMode()).to.be.false;
+      await raffleContract.connect(nonOwner).enterClaimsMode();
+      expect(await raffleContract.inClaimsMode()).to.be.true;
+    });
   });
 
   describe("claim", function() {
@@ -889,6 +1067,8 @@ describe("APunkForYouAndMe", function () {
         await punksReaderContract.callStatic.ownerOf(PUNK_ID_3)
         ).to.equal(punkHolder.address);
       console.timeEnd("Winner buying punk");
+
+      await raffleContract.enterClaimsMode();
 
       const totalDeposited = await raffleContract.totalDeposited();
       const postPunkPurchasesBalance = await raffleContract.postPunkPurchasesBalance();

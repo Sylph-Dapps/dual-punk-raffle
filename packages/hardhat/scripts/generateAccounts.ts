@@ -1,6 +1,11 @@
 import { ethers } from "ethers";
 import * as fs from "fs";
 
+const {
+  parseEther,
+  formatEther,
+} = ethers.utils;
+
 function writeWalletsToFile(count) {
   const wallets = [];
   for(let i = 0; i < count; i++) {
@@ -12,7 +17,13 @@ function writeWalletsToFile(count) {
 }
 
 async function main() {
-  writeWalletsToFile(20000);
+  //writeWalletsToFile(20000);
+
+  let x = ethers.BigNumber.from(1);
+  for(let i = 0; i < 75; i++) {
+    console.log(i, formatEther(x));
+    x = x.mul(2);
+  }
 }
 
 main().catch(error => {
