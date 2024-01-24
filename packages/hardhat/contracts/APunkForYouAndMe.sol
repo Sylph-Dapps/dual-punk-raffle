@@ -48,7 +48,7 @@ contract APunkForYouAndMe is Ownable {
     return deposits.length;
   }
 
-  function getAmountDeposited(address addr) public view returns (uint num) {
+  function getAmountDeposited(address addr) public view returns (uint amount) {
     return addressesToAmountDeposited[addr];
   }
 
@@ -58,6 +58,7 @@ contract APunkForYouAndMe is Ownable {
 
   function deposit() public payable {
     require(msg.sender == tx.origin, "Only EOAs");
+    require(msg.sender != owner(), "No double dipping!");
     require(msg.value > 0.0001 ether, "Don't be cheap!");
     require(address(this).balance - msg.value < targetBalance, "Target already met");
     require(winner == address(0), "Winner already selected");
@@ -150,15 +151,20 @@ contract APunkForYouAndMe is Ownable {
     inClaimsMode = true;
   }
 
-  // TODO add a view function to calculate your claim amount
+  function getClaimAmount(address addr) public view returns (uint claimableAmount) {
+    require(inClaimsMode, "Not in claims mode");
+
+    // The amount to claim should be the user's proportional share of the remainder relative to the amount they deposited
+    return (postPunkPurchasesBalance * addressesToAmountDeposited[addr]) / totalDeposited;
+  }
+
   // TODO add a sweep function that can be called after the claim period ends
   // TODO nix the winner's deposit and give it to everyone else
   function claim() public {
     require(inClaimsMode, "Not in claims mode");
     require(addressesToAmountDeposited[msg.sender] > 0, "No deposit to claim");
-    
-    // The amount to claim should be the user's proportional share of the remainder relative to the amount they deposited
-    uint256 claimableAmount = (postPunkPurchasesBalance * addressesToAmountDeposited[msg.sender]) / totalDeposited;
+
+    uint256 claimableAmount = getClaimAmount(msg.sender);
     addressesToAmountDeposited[msg.sender] = 0;
     (bool success,) = msg.sender.call{value: claimableAmount}("");
     if(!success) {
