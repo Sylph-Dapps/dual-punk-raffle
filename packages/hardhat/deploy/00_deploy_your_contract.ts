@@ -2,6 +2,11 @@ import { HardhatRuntimeEnvironment } from "hardhat/types";
 import { DeployFunction } from "hardhat-deploy/types";
 import { ethers } from "hardhat";
 
+const {
+  parseEther,
+  formatEther,
+} = ethers.utils;
+
 /**
  * Deploys a contract named "YourContract" using the deployer account and
  * constructor arguments set to the deployer address
@@ -22,14 +27,41 @@ const deployYourContract: DeployFunction = async function (hre: HardhatRuntimeEn
   //const { deployer } = await hre.getNamedAccounts();
   //const { deploy } = hre.deployments;
 
+  const punkOwner = (await ethers.getSigners())[0];
+
+  const cryptoPunksMarketContractFactory = await ethers.getContractFactory("CryptoPunksMarket");
+  const punksContract = await cryptoPunksMarketContractFactory.deploy()
+  await punksContract.deployed();
+  console.log("Deployed CryptoPunksMarket at", punksContract.address);
+
+  await punksContract.setInitialOwners(
+    Array.from({ length: 100 }, () => punkOwner.address),
+    Array.from({ length: 100 }, (_, index) => index)
+  );
+  await punksContract.allInitialOwnersAssigned();
+  console.log("Initial punk owner set to", punkOwner.address);
+
   const raffleContractFactory = await ethers.getContractFactory("APunkForYouAndMe");
   const raffleContract = await raffleContractFactory.deploy();
   await raffleContract.deployed();
-  console.log(`Deployed storage at ${raffleContract.address}`);
+  console.log("Deployed APunkForYouAndMe at", raffleContract.address);
 
-  //console.log(await raffleContract.x());
-  //await raffleContract.setX(5);
-  //console.log(await raffleContract.x());
+  const referralPointsCalculatorContractFactory = await ethers.getContractFactory("ReferralPointsCalculator");
+  const calculatorContract = await referralPointsCalculatorContractFactory.deploy();
+  console.log("Deployed ReferralPointsCalculator at", calculatorContract.address);
+  
+  await raffleContract.setPunksContract(punksContract.address);
+  console.log(`Linked APunkForYouAndMe to CryptoPunksMarket`);
+
+  await raffleContract.setEntryCalculator(calculatorContract.address);
+  console.log(`Linked APunkForYouAndMe to ReferralPointsCalculator`);
+
+  await calculatorContract.setReferrerLookup(raffleContract.address);
+  console.log(`Linked ReferralPointsCalculator to APunkForYouAndMe`);
+
+  const targetBalance = parseEther("150");
+  await raffleContract.setTargetBalance(targetBalance);
+  console.log(`Target balance set to ${formatEther(targetBalance)}`);
 };
 
 export default deployYourContract;

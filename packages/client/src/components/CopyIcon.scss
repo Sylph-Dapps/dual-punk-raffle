@@ -1,0 +1,18 @@
+@import '../palette.scss';
+
+.CopyIcon {
+  width: 20px;
+  height: 20px;
+  display: inline-block;
+  cursor: pointer;
+
+  path {
+    fill: $primary-color;
+  }
+
+  &:hover {
+    path {
+      fill: $secondary-color;
+    }
+  }
+}

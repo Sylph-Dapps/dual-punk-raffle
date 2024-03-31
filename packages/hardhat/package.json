@@ -12,7 +12,8 @@
     "lint-staged": "eslint --config ./.eslintrc.json --ignore-path ./.eslintignore",
     "test": "REPORT_GAS=true hardhat test --network hardhat",
     "verify": "hardhat etherscan-verify",
-    "generate-accounts": "hardhat run --show-stack-traces scripts/generateAccounts.ts"
+    "generate-accounts": "hardhat run --show-stack-traces scripts/generateAccounts.ts",
+    "select-winner": "hardhat run --show-stack-traces scripts/selectWinner.ts"
   },
   "devDependencies": {
     "@ethersproject/abi": "^5.7.0",

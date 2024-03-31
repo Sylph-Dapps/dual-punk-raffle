@@ -74,19 +74,18 @@ describe("getRandomBigNumber", () => {
 
 describe("APunkForYouAndMe", function () {
   let gasliteDropContract: any;
-  let raffleContract: any;
   let punksContract: any;
   let punksReaderContract: any;
+  let calculatorContract: any;
+  let raffleContract: any;
   let owner: any;
   
   before(async () => {
     owner = (await ethers.getSigners())[0];
 
-    //console.time("Deploying GasliteDrop");
     const gasliteDropContractFactory = await ethers.getContractFactory("GasliteDrop");
     gasliteDropContract = await gasliteDropContractFactory.deploy();
     gasliteDropContract.deployed();
-    //console.timeEnd("Deploying GasliteDrop");
   })
 
   beforeEach(async () => {
@@ -99,10 +98,16 @@ describe("APunkForYouAndMe", function () {
     await punksReaderContract.deployed();
     await punksReaderContract.setPunksContract(punksContract.address);
 
+    const referralPointsCalculatorContractFactory = await ethers.getContractFactory("ReferralPointsCalculator");
+    calculatorContract = await referralPointsCalculatorContractFactory.deploy();
+
     const raffleContractFactory = await ethers.getContractFactory("APunkForYouAndMe");
     raffleContract = await raffleContractFactory.deploy();
     await raffleContract.deployed();
     await raffleContract.setPunksContract(punksContract.address);
+    await raffleContract.setEntryCalculator(calculatorContract.address);
+
+    await calculatorContract.setReferrerLookup(raffleContract.address);
   });
 
   describe("setPunksContract", function() {
@@ -195,7 +200,7 @@ describe("APunkForYouAndMe", function () {
     */
   });
 
-  describe("getNumDeposits", function() {
+  describe("getNumEntries", function() {
     beforeEach(async () => {
       await raffleContract.setTargetBalance(parseEther("100"));
     });
@@ -212,8 +217,8 @@ describe("APunkForYouAndMe", function () {
         });
       }
       
-      const numDeposits = await raffleContract.getNumDeposits();
-      expect(numDeposits).to.equal(signers.length - 1);
+      const numEntries = await raffleContract.getNumEntries();
+      expect(numEntries).to.equal(signers.length - 1);
     });
     it("should return the number of deposits when there are duplicates", async function() {
       const DEPOSIT_AMOUNT = parseEther("1");
@@ -233,8 +238,8 @@ describe("APunkForYouAndMe", function () {
         });
       }
       
-      const numDeposits = await raffleContract.getNumDeposits();
-      expect(numDeposits).to.equal(signers.length - 1);
+      const numEntries = await raffleContract.getNumEntries();
+      expect(numEntries).to.equal(signers.length - 1);
     });
     it("should return the number of deposits when they all come from one person", async function() {
       const DEPOSIT_AMOUNT = parseEther("1");
@@ -251,8 +256,8 @@ describe("APunkForYouAndMe", function () {
         });
       }
       
-      const numDeposits = await raffleContract.getNumDeposits();
-      expect(numDeposits).to.equal(signers.length);
+      const numEntries = await raffleContract.getNumEntries();
+      expect(numEntries).to.equal(signers.length);
     });
   });
 
@@ -313,8 +318,8 @@ describe("APunkForYouAndMe", function () {
             gasLimit: 1_000_000
           });
   
-          const numDeposits = await raffleContract.getNumDeposits();
-          expect(numDeposits).to.equal((i + 1) + (j * (signers.length)));
+          const numEntries = await raffleContract.getNumEntries();
+          expect(numEntries).to.equal((i + 1) + (j * (signers.length)));
         }
       }
     });
@@ -412,6 +417,221 @@ describe("APunkForYouAndMe", function () {
           gasLimit: 1_000_000
         })
       ).to.eventually.be.rejected;
+    });
+    it("should update totalPoints and addressesToPoints", async function() {
+      const signers = await ethers.getSigners();
+      const depositAmount = parseEther("1");
+
+      const pointsLookup: Record<string, BigNumber> = {};
+      const computeTotalPoints = () => {
+        let total = BigNumber.from(0);
+        Object.values(pointsLookup).forEach((amount: any) => total = total.add(amount));
+        return total;
+      }
+
+      // A plain ordinary deposit
+      const ogDepositor = signers[1];
+      await raffleContract.connect(ogDepositor).deposit({
+        value: depositAmount,
+      });
+      pointsLookup[ogDepositor.address] = depositAmount.add(0);
+      expect(
+        await raffleContract.getPointsForAddress(ogDepositor.address)
+      ).to.equal(pointsLookup[ogDepositor.address]);
+      expect(
+        await raffleContract.totalPoints()
+      ).to.equal(computeTotalPoints());
+
+      // This should reject because you cannot use a referrer that hasn't deposited
+      const referral = signers[2];
+      await expect(raffleContract.connect(referral).depositWithReferrer("0x1000000000000000000000000000000000000000", {
+        value: depositAmount,
+      })).to.eventually.be.rejected;
+
+      // Using the zero address is worth checking too
+      await expect(raffleContract.connect(referral).depositWithReferrer("0x0000000000000000000000000000000000000000", {
+        value: depositAmount,
+      })).to.eventually.be.rejected;
+      
+      // Cannot refer yourself
+      await expect(raffleContract.connect(referral).depositWithReferrer(referral.address, {
+        value: depositAmount,
+      })).to.eventually.be.rejected;
+      
+      // Deposit with a valid referrer should work
+      await raffleContract.connect(referral).depositWithReferrer(ogDepositor.address, {
+        value: depositAmount,
+      });
+      pointsLookup[referral.address] = depositAmount.mul(2);
+      pointsLookup[ogDepositor.address] = pointsLookup[ogDepositor.address].add(depositAmount.div(10));
+      expect(
+        await raffleContract.getPointsForAddress(referral.address),
+        "Using a referral should earn them double points"
+      ).to.equal(pointsLookup[referral.address]);
+      expect(
+        await raffleContract.getPointsForAddress(ogDepositor.address),
+        "The OG depositor's points should have a bonus because someone used their referral code"
+      ).to.equal(pointsLookup[ogDepositor.address]);
+      expect(
+        await raffleContract.totalPoints(),
+        "The depositor's and the referrer's points should be added to the totalPoints"
+      ).to.equal(computeTotalPoints());
+
+      // Deposit with a valid referrer that was also referred should work
+      const grandReferral = signers[3];
+      await raffleContract.connect(grandReferral).depositWithReferrer(referral.address, {
+        value: depositAmount,
+      });
+      pointsLookup[grandReferral.address] = depositAmount.mul(2);
+      pointsLookup[referral.address] = pointsLookup[referral.address].add(depositAmount.div(10));
+      pointsLookup[ogDepositor.address] = pointsLookup[ogDepositor.address].add(depositAmount.div(50));
+      expect(
+        await raffleContract.getPointsForAddress(grandReferral.address),
+        "Using a referral should earn them double points even with a grand referral"
+      ).to.equal(pointsLookup[grandReferral.address]);
+      expect(
+        await raffleContract.getPointsForAddress(referral.address),
+        "The referrer should have a bonus because someone used their referral code"
+      ).to.equal(pointsLookup[referral.address]);
+      expect(
+        await raffleContract.getPointsForAddress(ogDepositor.address),
+        "The grandreferrer should have a bonus because someone used their referral code"
+      ).to.equal(pointsLookup[ogDepositor.address]);
+      expect(
+        await raffleContract.totalPoints(),
+        "The total points should match our tracking"
+      ).to.equal(computeTotalPoints());
+
+      // Deposit with a huge amount
+      const whale = signers[4];
+      const whaleDepositAmount = depositAmount.mul("100");
+      await raffleContract.connect(whale).depositWithReferrer(referral.address, {
+        value: whaleDepositAmount,
+      });
+
+      // The whale pushed up against the point caps for the referral and the ogDepositer.
+      const referralDepositAmount = await raffleContract.getAmountDeposited(referral.address);
+      expect(referralDepositAmount).to.equal(depositAmount);
+      expect(referralDepositAmount).to.be.lessThan(whaleDepositAmount);
+
+      const ogDepositAmount = await raffleContract.getAmountDeposited(ogDepositor.address);
+      expect(ogDepositAmount).to.equal(depositAmount);
+      expect(ogDepositAmount).to.be.lessThan(whaleDepositAmount);
+
+      pointsLookup[whale.address] = whaleDepositAmount.mul(2);
+      pointsLookup[referral.address] = pointsLookup[referral.address].add(referralDepositAmount);
+      pointsLookup[ogDepositor.address] = pointsLookup[ogDepositor.address].add(ogDepositAmount);
+      expect(
+        await raffleContract.getPointsForAddress(whale.address),
+        "Using a referral should earn the whale double points"
+      ).to.equal(pointsLookup[whale.address]);
+      expect(
+        await raffleContract.getPointsForAddress(referral.address),
+        "The referrer should have a bonus because a whale used their referral code, but it should not be more than they deposited themselves"
+      ).to.equal(pointsLookup[referral.address]);
+      expect(
+        await raffleContract.getPointsForAddress(ogDepositor.address),
+        "The grandreferrer should have a bonus because a whale used their referees code, but it should not be more than they deposited themselves"
+      ).to.equal(pointsLookup[ogDepositor.address]);
+      expect(
+        await raffleContract.totalPoints(),
+        "The total points should match our tracking"
+      ).to.equal(computeTotalPoints());
+
+      // Now with a medium-large amount. This will exercise the grandreferral getting capped
+      // but the direct referral not getting capped.
+      const bigFish = signers[5];
+      const bigFishAmount = depositAmount.mul("75");
+      await raffleContract.connect(bigFish).depositWithReferrer(whale.address, {
+        value: bigFishAmount,
+      });
+
+      // The big fish pushed up against the point caps for the referral but not for the whale
+      const whaleDepositAmountFromContract = await raffleContract.getAmountDeposited(whale.address);
+      expect(whaleDepositAmountFromContract).to.equal(whaleDepositAmount);
+      expect(whaleDepositAmountFromContract).to.be.greaterThan(bigFishAmount.div(10));
+      
+      const referralDepositAmountFromContract = await raffleContract.getAmountDeposited(referral.address);
+      expect(referralDepositAmountFromContract).to.equal(depositAmount);
+      expect(referralDepositAmountFromContract).to.be.lessThan(bigFishAmount.div(50));
+
+      pointsLookup[bigFish.address] = bigFishAmount.mul(2);
+      pointsLookup[whale.address] = pointsLookup[whale.address].add(bigFishAmount.div(10)); // Didn't reach cap
+      pointsLookup[referral.address] = pointsLookup[referral.address].add(referralDepositAmount); // Capped
+      
+      expect(
+        await raffleContract.getPointsForAddress(bigFish.address),
+        "Big fish used a referral code so gets double points"
+      ).to.equal(pointsLookup[bigFish.address]);
+      expect(
+        await raffleContract.getPointsForAddress(whale.address),
+        "Whale should get bonus points at the normal rate because their bonus doesn't hit their cap"
+      ).to.equal(pointsLookup[whale.address]);
+      expect(
+        await raffleContract.getPointsForAddress(referral.address),
+        "The referral's points should be capped"
+      ).to.equal(pointsLookup[referral.address]);
+      expect(
+        await raffleContract.getPointsForAddress(ogDepositor.address),
+        "ogDepositor is far enough upstream that they don't get a reward"
+      ).to.equal(pointsLookup[ogDepositor.address]);
+      expect(
+        await raffleContract.totalPoints(),
+        "The total points should match our tracking"
+      ).to.equal(computeTotalPoints());
+
+      // Now with a gigantic amount. This will exercies the direct referral getting
+      // capped but the grandreferral not getting capped.
+      const giganticWhale = signers[6];
+      const giganticWhaleAmount = depositAmount.mul("1500");
+      await raffleContract.connect(giganticWhale).depositWithReferrer(bigFish.address, {
+        value: giganticWhaleAmount,
+      });
+
+      // The giganticWhale pushs up against the point caps for their direct referral (bigFish)
+      // but not for their grandreferral (whale).
+      expect(
+        await raffleContract.getAmountDeposited(bigFish.address)
+      ).to.equal(bigFishAmount);
+      expect(
+        await raffleContract.getAmountDeposited(bigFish.address)
+      ).to.be.lessThan(giganticWhaleAmount.div(10));
+      expect(
+        await raffleContract.getAmountDeposited(whale.address)
+      ).to.equal(whaleDepositAmount);
+      expect(
+        await raffleContract.getAmountDeposited(whale.address)
+      ).to.be.greaterThan(giganticWhaleAmount.div(50));
+
+      pointsLookup[giganticWhale.address] = giganticWhaleAmount.mul(2);
+      pointsLookup[bigFish.address] = pointsLookup[bigFish.address].add(bigFishAmount); // Reached cap
+      pointsLookup[whale.address] = pointsLookup[whale.address].add(giganticWhaleAmount.div(50)); // Didn't reach cap
+      
+      expect(
+        await raffleContract.getPointsForAddress(giganticWhale.address),
+        "Gigantic whaled used a referral code so gets double points"
+      ).to.equal(pointsLookup[giganticWhale.address]);
+      expect(
+        await raffleContract.getPointsForAddress(bigFish.address),
+        "Big fish should get bonus points capped based on gigantic whale's deposit size"
+      ).to.equal(pointsLookup[bigFish.address]);
+      expect(
+        await raffleContract.getPointsForAddress(whale.address),
+        "Whale should get the grandreferral bonus"
+      ).to.equal(pointsLookup[whale.address]);
+      expect(
+        await raffleContract.getPointsForAddress(referral.address),
+        "referral is far enough upstream that they don't get a reward"
+      ).to.equal(pointsLookup[referral.address]);
+      expect(
+        await raffleContract.getPointsForAddress(ogDepositor.address),
+        "ogDepositor is far enough upstream that they don't get a reward"
+      ).to.equal(pointsLookup[ogDepositor.address]);
+      expect(
+        await raffleContract.totalPoints(),
+        "The total points should match our tracking"
+      ).to.equal(computeTotalPoints());
+
     });
   });
 
@@ -852,17 +1072,18 @@ describe("APunkForYouAndMe", function () {
 
     const wallets = loadWalletsFromFile('privateKeys.txt', NUM_WALLETS);
     const punkHolder = ethers.Wallet.createRandom().connect(ethers.provider);
+    let winner;
     
     before(async function() {
       // Send each wallet initial funds
       for(let i = 0; i < wallets.length; i++) {
         await owner.sendTransaction({
           to: wallets[i].address,
-          value: parseEther("50")
+          value: parseEther("50"),
         });
       }
 
-      // Give punkHolder some ETH 
+      // Give punkHolder some ETH
       await owner.sendTransaction({
         to: punkHolder.address,
         value: parseEther("1")
@@ -906,7 +1127,7 @@ describe("APunkForYouAndMe", function () {
       // Pick winner
       await raffleContract.selectWinner();
       const winnerAddress = await raffleContract.winner();
-      const winner = wallets.find(w => w.address === winnerAddress);
+      winner = wallets.find(w => w.address === winnerAddress);
     
       // Owner buys punk
       await raffleContract.buyPunk(0, PUNK_COST);
@@ -927,9 +1148,22 @@ describe("APunkForYouAndMe", function () {
     it("should only be callable by depositors once", async function() {
       expect(await raffleContract.inClaimsMode()).to.be.true;
 
+      let processedWinner = false;
+      let processedAnyoneElse = false;
       for(let i = 0; i < NUM_WALLETS; i++) {
-        await raffleContract.connect(wallets[i]).claim();
+        if(wallets[i] === winner) {
+          await expect(
+            raffleContract.connect(winner).claim(),
+            "The winner doesn't get to claim"
+          ).to.eventually.be.rejected;
+          processedWinner = true;
+        } else {
+          await raffleContract.connect(wallets[i]).claim();
+          processedAnyoneElse = true;
+        }
       }
+      expect(processedWinner).to.be.true;
+      expect(processedAnyoneElse).to.be.true;
 
       for(let i = 0; i < NUM_WALLETS; i++) {
         await expect(raffleContract.connect(wallets[i]).claim()).to.eventually.be.rejected;
@@ -945,27 +1179,49 @@ describe("APunkForYouAndMe", function () {
       await expect(raffleContract.connect(wallets[999]).claim()).to.eventually.be.rejected;
       await expect(raffleContract.claim()).to.eventually.be.rejected;
     });
-    it("should distribute a proportional amount of the ETH deposited", async function() {
+    it("should distribute a proportional amount of the ETH remaining based on deposits", async function() {
       const totalDeposited = await raffleContract.totalDeposited();
+      const winnerDepositAmount = await raffleContract.getAmountDeposited(winner.address);
       const postPunkPurchasesBalance = await raffleContract.postPunkPurchasesBalance();
-      
-      // before/beforeEach had each of the punks go for 0.25 of the deposited amount so half the balance remains
-      const ratio = totalDeposited.div(postPunkPurchasesBalance);
-      expect(ratio).to.equal(2);
+
+      // beforeEach had accounts deposit 1, 2, 3, 4, and 5 ETH four times each for a total of 60 ETH.
+      // The amount spent on the two punks totaled 30 ETH.
+      // Since the winner's ETH deposit is staying in the contract that leaves either:
+      // - Winner contributed 1 ETH per round: 26 ETH
+      // - Winner contributed 2 ETH per round: 22 ETH
+      // - Winner contributed 3 ETH per round: 18 ETH
+      // - Winner contributed 4 ETH per round: 14 ETH
+      // - Winner contributed 5 ETH per round: 10 ETH
+      const descalingFactor = 1_000_000_000_000;
+      const numerator = (totalDeposited.sub(winnerDepositAmount)).div(descalingFactor);
+      const denominator = postPunkPurchasesBalance.div(descalingFactor);
+      const ratio = numerator / denominator;
 
       for(let i = 0; i < wallets.length; i++) {
         const wallet = wallets[i];
         const amountDeposited = await raffleContract.getAmountDeposited(wallet.address);
         const claimableAmount = await raffleContract.getClaimAmount(wallet.address);
-        expect(claimableAmount.mul(ratio)).to.equal(amountDeposited);
 
-        const b0 = await ethers.provider.getBalance(wallet.address);
-        const tx = await raffleContract.connect(wallet).claim();
-        const receipet = await tx.wait();
-        const totalGas = receipet.cumulativeGasUsed.mul(receipet.effectiveGasPrice);
-        const b1 = await ethers.provider.getBalance(wallet.address);
-        const claimedAmount = b1.add(totalGas).sub(b0);
-        expect(claimedAmount).to.equal(claimableAmount);
+        if(wallet === winner) {
+          expect(claimableAmount).to.equal(0);
+          await expect(raffleContract.connect(winner).claim()).to.eventually.be.rejected;
+        } else {
+          // Because we're doing stupid stuff with division and decimals and big numbers these
+          // claimableAmount * ratio is not always exactly equal to the amount deposited, but it
+          // gets within a few gwei.
+          expect(
+            Math.ceil(claimableAmount.div(descalingFactor).toNumber() * ratio) - amountDeposited.div(descalingFactor),
+            "The claimableAmount should be the amount amountDeposited times the ratio"
+          ).to.be.lessThan(2);
+
+          const b0 = await ethers.provider.getBalance(wallet.address);
+          const tx = await raffleContract.connect(wallet).claim();
+          const receipet = await tx.wait();
+          const totalGas = receipet.cumulativeGasUsed.mul(receipet.effectiveGasPrice);
+          const b1 = await ethers.provider.getBalance(wallet.address);
+          const claimedAmount = b1.add(totalGas).sub(b0);
+          expect(claimedAmount).to.equal(claimableAmount);
+        }
       }
     });
   });
@@ -1201,41 +1457,68 @@ describe("APunkForYouAndMe", function () {
 
       const totalDeposited = await raffleContract.totalDeposited();
       const postPunkPurchasesBalance = await raffleContract.postPunkPurchasesBalance();
-      const claimableAmountPerAddress = postPunkPurchasesBalance.div(participantAddresses.length);
+      const claimableAmountPerAddress = postPunkPurchasesBalance.div(participantAddresses.length - 1); /* -1 because the winner doesn't get a claim */
       console.log({
         totalDeposited: formatEther(totalDeposited),
         PUNK_COST_1: formatEther(PUNK_COST_1),
         PUNK_COST_2: formatEther(PUNK_COST_2),
         postPunkPurchasesBalance: formatEther(postPunkPurchasesBalance),
-        numParticipants: participantAddresses.length,
+        numLosers: participantAddresses.length - 1,
         claimableAmountPerAddress: formatEther(claimableAmountPerAddress),
       });
       expect(
-        totalDeposited.sub(PUNK_COST_1).sub(PUNK_COST_2)
+        totalDeposited.sub(PUNK_COST_1).sub(PUNK_COST_2),
+        "The postPunkPurchasesBalance should be correct"
       ).to.equal(postPunkPurchasesBalance);
 
       const addresses = Object.keys(addressesToWallets);
+      let processedWinner = false;
+      let processedAnyoneElse = false;
       for (let i = 0; i < addresses.length; i++) {
         const wallet = addressesToWallets[addresses[i]];
+        const claimableAmount = await raffleContract.getClaimAmount(wallet.address);
         const b0 = await ethers.provider.getBalance(wallet.address);
-        const tx = await raffleContract.connect(wallet).claim();
-        const receipet = await tx.wait();
-        const totalGas = receipet.cumulativeGasUsed.mul(receipet.effectiveGasPrice);
-        const b1 = await ethers.provider.getBalance(wallet.address);
-        const claimedAmount = b1.add(totalGas).sub(b0);
-        /*
-        console.log({
-          b0: formatEther(b0),
-          gasUsed: formatEther(totalGas),
-          b1: formatEther(b1),
-          refunded: formatEther(claimedAmount)
-        });
-        */
-        expect(claimedAmount).to.equal(claimableAmountPerAddress);
+        if(addresses[i] === winner) {
+          expect(claimableAmount).to.equal(0);
+          await expect(raffleContract.connect(winner).claim()).to.eventually.be.rejected;
+          processedWinner = true;
+        } else {
+          expect(
+            claimableAmount,
+            "The claimble amount reported by the contract should match the value we calculated in the test"
+          ).to.equal(claimableAmountPerAddress);
+
+          const tx = await raffleContract.connect(wallet).claim();
+          const receipet = await tx.wait();
+          const totalGas = receipet.cumulativeGasUsed.mul(receipet.effectiveGasPrice);
+          const b1 = await ethers.provider.getBalance(wallet.address);
+          const claimedAmount = b1.add(totalGas).sub(b0);
+          processedAnyoneElse = true;
+          /*
+          console.log({
+            b0: formatEther(b0),
+            gasUsed: formatEther(totalGas),
+            b1: formatEther(b1),
+            refunded: formatEther(claimedAmount)
+          });
+          */
+          expect(
+            claimedAmount,
+            "The amount claimed should be the value we calculated in the test"
+          ).to.equal(claimableAmountPerAddress);
+        }
       }
+      expect(processedWinner, "The winner should be processed").to.be.true;
+      expect(processedAnyoneElse, "At least one other should be processed").to.be.true;
+
+      const amountRemaining = postPunkPurchasesBalance.sub(claimableAmountPerAddress.mul(wallets.length - 1));
+      expect(
+        amountRemaining,
+        "Only dust should be left that could not be divided among all claimers should be left"
+      ).is.lessThan(wallets.length - 1);
 
       const rcb0 = await ethers.provider.getBalance(raffleContract.address);
-      expect(rcb0).to.equal(0);
+      expect(rcb0).to.equal(amountRemaining);
 
       /*const addresses = Object.keys(winnerCounts);
       for (let i = 0; i < addresses.length; i++) {
@@ -1247,18 +1530,52 @@ describe("APunkForYouAndMe", function () {
 });
 
 describe("APunkForYouAndMe - Multiple iterations", function() {
+
+  let gasliteDropContract: any;
+  let punksContract: any;
+  //let punksReaderContract: any;
+  let owner: any;
+  //let punkHolder: any;
+  
+  before(async () => {
+    owner = (await ethers.getSigners())[0];
+
+    const gasliteDropContractFactory = await ethers.getContractFactory("GasliteDrop");
+    gasliteDropContract = await gasliteDropContractFactory.deploy();
+    gasliteDropContract.deployed();
+  })
+
+  beforeEach(async () => {
+    const cryptoPunksMarketContractFactory = await ethers.getContractFactory("CryptoPunksMarket");
+    punksContract = await cryptoPunksMarketContractFactory.deploy()
+    await punksContract.deployed();
+
+    /*
+    const cryptoPunksMarketReaderContractFactory = await ethers.getContractFactory("CryptoPunksMarketReader");
+    punksReaderContract = await cryptoPunksMarketReaderContractFactory.deploy();
+    await punksReaderContract.deployed();
+    await punksReaderContract.setPunksContract(punksContract.address);
+ 
+    const owner = (await ethers.getSigners())[0];
+    punkHolder = ethers.Wallet.createRandom().connect(ethers.provider);
+
+    await owner.sendTransaction({
+      to: punkHolder.address,
+      value: parseEther("1")
+    });
+
+    await punksContract.setInitialOwners(
+      Array.from({ length: 100 }, () => punkHolder.address),
+      Array.from({ length: 100 }, (_, index) => index)
+    );
+    await punksContract.allInitialOwnersAssigned();
+    */
+  });
+
   describe("buyPunk", async function() {
     it("should pick every depositor at least once", async function() {
       const NUM_ITERATIONS = 30;
       const NUM_WALLETS = 5;
-      
-      const owner = (await ethers.getSigners())[0];
-      
-      const punkHolder = ethers.Wallet.createRandom().connect(ethers.provider);
-      await owner.sendTransaction({
-        to: punkHolder.address,
-        value: parseEther("1")
-      });
 
       const wallets = loadWalletsFromFile('privateKeys.txt', NUM_WALLETS);
       for(let i = 0; i < wallets.length; i++) {
@@ -1271,28 +1588,18 @@ describe("APunkForYouAndMe - Multiple iterations", function() {
       const winCounts = {};
       wallets.forEach(w => winCounts[w.address] = 0);
 
-      const cryptoPunksMarketContractFactory = await ethers.getContractFactory("CryptoPunksMarket");
-      const punksContract = await cryptoPunksMarketContractFactory.deploy();
-      await punksContract.deployed();
-    
-      const cryptoPunksMarketReaderContractFactory = await ethers.getContractFactory("CryptoPunksMarketReader");
-      const punksReaderContract = await cryptoPunksMarketReaderContractFactory.deploy();
-      await punksReaderContract.deployed();
-      await punksReaderContract.setPunksContract(punksContract.address);
-
-      await punksContract.setInitialOwners(
-        Array.from({ length: 100 }, () => punkHolder.address),
-        Array.from({ length: 100 }, (_, index) => index)
-      );
-      await punksContract.allInitialOwnersAssigned();
-
       for(let i = 0; i < NUM_ITERATIONS; i++) {
+        // Deploy basic points calculator
+        const calculatorContractFactory = await ethers.getContractFactory("BasicPointsCalculator");
+        const calculatorContract = await calculatorContractFactory.deploy();
+        
         // Deploy raffle contract
         const raffleContractFactory = await ethers.getContractFactory("APunkForYouAndMe");
         const raffleContract = await raffleContractFactory.deploy();
         await raffleContract.deployed();
         await raffleContract.setPunksContract(punksContract.address);
         await raffleContract.setTargetBalance(parseEther(NUM_WALLETS.toString()));
+        await raffleContract.setEntryCalculator(calculatorContract.address);
 
         // Make raffle entries
         for(let j = 0; j < NUM_WALLETS; j++) {
@@ -1308,8 +1615,66 @@ describe("APunkForYouAndMe - Multiple iterations", function() {
       }
 
       for(let i = 0; i < wallets.length; i++) {
-        expect(winCounts[wallets[i].address]).greaterThan(0);
+        expect(winCounts[wallets[i].address]).to.be.greaterThan(0);
       }
+    });
+    it("should give odds to people with more points", async function() {
+      const NUM_ITERATIONS = 30;
+      const NUM_WALLETS = 5;
+
+      const wallets = loadWalletsFromFile('privateKeys.txt', NUM_WALLETS);
+      for(let i = 0; i < wallets.length; i++) {
+        await owner.sendTransaction({
+          to: wallets[i].address,
+          value: parseEther(((NUM_ITERATIONS * 10) + 1).toString())
+        });
+      }
+
+      const winCounts = {};
+      wallets.forEach(w => winCounts[w.address] = 0);
+
+      for(let i = 0; i < NUM_ITERATIONS; i++) {
+        const calculatorContractFactory = await ethers.getContractFactory("ReferralPointsCalculator");
+        const calculatorContract = await calculatorContractFactory.deploy();
+        
+        // Deploy raffle contract
+        const raffleContractFactory = await ethers.getContractFactory("APunkForYouAndMe");
+        const raffleContract = await raffleContractFactory.deploy();
+        await raffleContract.deployed();
+        await raffleContract.setPunksContract(punksContract.address);
+        await raffleContract.setTargetBalance(parseEther("14"));
+        await raffleContract.setEntryCalculator(calculatorContract.address);
+
+        await calculatorContract.setReferrerLookup(raffleContract.address);
+
+        // Make raffle entries
+        for(let j = 0; j < NUM_WALLETS; j++) {
+          await raffleContract.connect(wallets[j]).deposit({
+            value: j === 0 ? parseEther("10") : parseEther("1")
+          });
+        }
+
+        // Pick winner
+        await raffleContract.selectWinner();
+        const winnerAddress = await raffleContract.winner();
+        winCounts[winnerAddress]++;
+      }
+
+      let whaleBidderWins = 0;
+      let everyoneElseWins = 0;
+      Object.keys(winCounts).forEach(address => {
+        if(address == wallets[0].address) {
+          whaleBidderWins += winCounts[address];
+        } else {
+          everyoneElseWins += winCounts[address];
+        }
+      })
+
+      // Whale is putting in 10 while everyone else is putting in a total of 4,
+      // so the whale should win a little more than half the time. For the purposes
+      // of this test though we can more definitively say they will win more often
+      // than everyone else combined.
+      expect(whaleBidderWins > everyoneElseWins).to.be.true;
     });
   });
 });

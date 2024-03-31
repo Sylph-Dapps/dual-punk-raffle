@@ -1,7 +1,180 @@
+@import './palette.scss';
+
 * {
   box-sizing: border-box;
+  font-family: Montserrat, sans-serif;
+  font-size: 18px;
+}
+
+body {
+  background: #fff;
+  color: #181818;
 }
 
 .App {
-  font-family: 'Roboto Slab', sans-serif;
+  width: 100%;
+  max-width: 900px;
+  margin: 0px auto;
+  line-height: 1.5em;
+  padding: 50px 20px;
+
+  header {
+    color: $primary-color;
+    font-size : 2em;
+    margin-bottom: 50px;
+    font-weight: 700;
+  }
+
+  h2 {
+    font-size: 24px;
+    font-weight: 700;
+    margin-top: 50px;
+  }
+
+  h3 {
+    margin:0;
+  }
+
+  li {
+    margin-bottom: 0.5em;
+  }
+
+  a {
+    color: $primary-color;
+
+    &:hover {
+      color: $secondary-color;
+    }
+  }
+
+  button {
+    background: $primary-color;
+    border: 2px solid;
+    border-color: $primary-color;
+    color: white;
+    cursor: pointer;
+    padding: 4px 20px;
+    border-radius: 2px;
+    font-size: 0.9em;
+
+    &:hover {
+      background: $secondary-color;
+      border-color: $secondary-color;
+      color: white;
+    }
+
+    &:active {
+      background: $tertiary-color;
+      border-color: $tertiary-color;
+      color: white;
+    }
+  }
+
+  input {
+    padding: 4px 20px;
+    border-radius: 2px;
+    border: 1px solid gray;
+    width: 120px;
+    text-align: left;
+  }
+
+  .disconnect-button {
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    svg {
+      width: 20px;
+      height: 20px;
+      
+      path {
+        stroke: $primary-color;
+      }
+    }
+  }
+
+  .address-display {
+    display: flex;
+    gap: 10px;
+  }
+
+  .field-label {
+    font-size: 12px;
+  }
+
+  .controls-container {
+
+    &.connected {
+      border: 1px solid $primary-color;
+      padding-left: 20px;
+      padding-right: 20px;
+      box-shadow: 2px 2px 2px $primary-color;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      width: 100%;
+
+      .contribution-controls {
+        align-items: flex-start;
+      }
+
+      .input-row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .address-info {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .address-info, .ref-info {
+        margin-top: 10px;
+        font-size: 14px;
+        text-align: center;
+        width: 100%;
+      }
+    }
+  }
+
+
+  .items {
+    display: flex;
+    justify-content: space-evenly;
+    padding-top: 10px;
+    padding-bottom: 10px;
+
+    &:not(:first-child) {
+      border-top: 1px solid black;
+    }
+
+    .item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+
+      .label {
+        border-bottom: 1px solid black;
+      }
+      .value {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-weight: 700;
+        padding-top: 10px;
+      }
+    }
+  }
+
+  .reflink, .reflink a {
+    text-align: center;
+    font-size: 14px;
+  }
 }
+
