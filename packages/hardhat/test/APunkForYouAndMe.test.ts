@@ -1635,12 +1635,20 @@ describe("APunkForYouAndMe - Multiple iterations", function() {
           });
         }
 
+        // Make raffle entries
+        const pointsPerAddress = {};
+        for(let j = 0; j < NUM_WALLETS; j++) {
+          const numPoints = await raffleContract.getPointsForAddress(wallets[j].address);
+          expect(numPoints).to.equal(parseEther("2")); // BasicPointsCalculator gives 2 points per 1 wei
+        }
+
         // Pick winner
         await raffleContract.selectWinner();
         const winnerAddress = await raffleContract.winner();
         winCounts[winnerAddress]++;
       }
 
+      console.log({winCounts})
       for(let i = 0; i < wallets.length; i++) {
         expect(winCounts[wallets[i].address]).to.be.greaterThan(0);
       }

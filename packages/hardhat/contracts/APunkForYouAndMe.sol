@@ -147,13 +147,14 @@ contract APunkForYouAndMe is Ownable {
     if(address(this).balance < targetBalance) revert TargetNotMet();
     if(winner != address(0)) revert WinnerAlreadySelected();
 
+    // Pick a number between 0 and the the total number of points
     uint256 randomNum = uint256(
       keccak256(
         abi.encodePacked(block.timestamp, block.prevrandao)
       )
-    ) % address(this).balance;
+    ) % totalPoints;
 
-    // Use binary search to find the entry where the start and end bound the generated value
+    // Use binary search to find the entry where the start and end bound the randomly selected value
     uint256 low = 0;
     uint256 high = entries.length - 1;
 
@@ -162,7 +163,7 @@ contract APunkForYouAndMe is Ownable {
         Entry memory midEntry = entries[mid];
 
         if (randomNum >= midEntry.start && randomNum <= midEntry.end) {
-            winner = midEntry.addr;
+            winner = midEntry.addr; // The address who made that deposit is the winner
             break;
         } else if (randomNum < midEntry.start) {
             high = mid - 1;
