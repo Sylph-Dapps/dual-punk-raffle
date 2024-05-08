@@ -1,5 +1,3 @@
-// Make points mode toggleable from basic to referral
-
 //SPDX-License-Identifier: MIT
 pragma solidity >=0.8.19 <0.9.0;
 
@@ -14,6 +12,27 @@ interface IPunkContract {
 interface IPointsCalculator {
   function calculatePoints(address addr, uint value) external view returns (address[] memory, uint[] memory);
 }
+
+error InvalidReferrer(); // The referrer in storage must be unset or be the same referrer the sender previously used.
+error CannotReferSelf(); // Points program operators hate this one weird trick!
+error ReferrerMustHaveDeposited(); // In order to refer others, a user must have first deposited into the contract.
+error OnlyEOAs(); // Let's not get into a mess where a smart contract address wins a punk and bad logic locks it away. EOAs only.
+error NoDoubleDipping(); // Do not allow the contract owner to deposit. It will break `buyPunk` if they win.
+error NotEnoughEth(); // Minimimum deposit size so we don't end up with people depositing miniscule amounts.
+error TargetAlreadyMet(); // Do not allow more deposits after the balance reaches the target.
+error WinnerAlreadySelected(); // No deposits after the winner has already been selected.
+error TargetNotMet(); // Do not allow the winner to be selected until the balance reacheds the target.
+error OwnerAlreadyPurchased(); // Only allow the owner to purchase one punk.
+error WinnerAlreadyPurchased(); // Only allow the winner to purchase one punk.
+error AddressCannotBuyPunk(); // Prevent calling `buyPunk` by anyone other than the contract owner and the winner.
+error DeadlineHasPassed(); // Require the owner and winner to buy their punks within a certain timeframe.
+error AmountExceedsBudget(); // The contract owner and the winner can each use no more than half of the amount deposited.
+error CannotStartClaimsMode(); // Claims mode can only be started under certain conditions.
+error NotInClaimsMode(); // Don't allow claims before we've entered claims mode.
+error NothingToClaim(); // Do not allow anyone to claim if there is no balance for them to claim.
+error FailedToClaim(); // Make sure transferring ETH is successful when calling `claim`.
+error ClaimsPeriodStillActive(); // The owner cannot sweep funds until after claims mode has run for two months.
+error FailedToSweep(); // Make sure transferring ETH is successful when calling `sweep`.
 
 contract APunkForYouAndMe is Ownable {
   event Deposited(address user, uint amount);
@@ -46,6 +65,7 @@ contract APunkForYouAndMe is Ownable {
   bool public winnerPurchased;
   uint256 public postPunkPurchasesBalance;
   bool public inClaimsMode;
+  uint256 public claimDeadline;
 
   mapping(address => address) referrers;
 
@@ -80,29 +100,26 @@ contract APunkForYouAndMe is Ownable {
     return addressesToPoints[addr];
   }
 
-  /*function getNumDepositors() public view returns (uint num) {
-    return depositors.length;
-  }*/
-
   function depositWithReferrer(address referrer) public payable {
-    require(referrers[msg.sender] == address(0) || referrers[msg.sender] == referrer, "Storage referrer must be unset or be the same referrer previously used");
-    require(msg.sender != referrer, "Cannot refer yourself");
-    require(addressesToAmountDeposited[referrer] > 0, "referrer must have previously deposited funds");
+    if(referrers[msg.sender] != address(0) && referrers[msg.sender] != referrer) revert InvalidReferrer();
+    if(msg.sender == referrer) revert CannotReferSelf();
+    if(addressesToAmountDeposited[referrer] == 0) revert ReferrerMustHaveDeposited();
+
     referrers[msg.sender] = referrer;
     deposit();
   }
 
   function deposit() public payable {
-    require(msg.sender == tx.origin, "Only EOAs");
-    require(msg.sender != owner(), "No double dipping!");
-    require(msg.value > 0.0001 ether, "Don't be cheap!");
-    require(address(this).balance - msg.value < targetBalance, "Target already met");
-    require(winner == address(0), "Winner already selected");
+    if(msg.sender != tx.origin) revert OnlyEOAs();
+    if(msg.sender == owner()) revert NoDoubleDipping();
+    if(msg.value < 0.0001 ether) revert NotEnoughEth();
+    if(address(this).balance - msg.value >= targetBalance) revert TargetAlreadyMet();
+    if(winner != address(0)) revert WinnerAlreadySelected();
 
     address[] memory addresses;
     uint256[] memory pointAmounts;
     (addresses, pointAmounts) = pointsCalculator.calculatePoints(msg.sender, msg.value);
-    for(uint i = 0; i < addresses.length; i++) {
+    for(uint i = 0; i < addresses.length;) {
       if(addresses[i] == address(0)) {
         break;
       }
@@ -116,18 +133,19 @@ contract APunkForYouAndMe is Ownable {
 
       addressesToPoints[addresses[i]] += pointAmounts[i];
       totalPoints += pointAmounts[i];
+
+      unchecked { i++; }
     }
 
     totalDeposited += msg.value;
-    postPunkPurchasesBalance += msg.value;
     addressesToAmountDeposited[msg.sender] += msg.value;
 
     emit Deposited(msg.sender, msg.value);
   }
 
   function selectWinner() public {
-    require(address(this).balance >= targetBalance, "Target not yet reached");
-    require(winner == address(0), "Winner has already been selected");
+    if(address(this).balance < targetBalance) revert TargetNotMet();
+    if(winner != address(0)) revert WinnerAlreadySelected();
 
     uint256 randomNum = uint256(
       keccak256(
@@ -153,21 +171,22 @@ contract APunkForYouAndMe is Ownable {
         }
     }
 
-    purchaseDeadline = block.timestamp + 30 days;
+    postPunkPurchasesBalance = address(this).balance;
+    purchaseDeadline = block.timestamp + 365 days;
 
     emit WinnerSelected(winner);
   }
 
   function buyPunk(uint punkId, uint amount) public {
     if(msg.sender == owner()) {
-      require(!ownerPurchased, "Owner has already purchased a punk");
+      if(ownerPurchased) revert OwnerAlreadyPurchased();
     } else if(msg.sender == winner) {
-      require(!winnerPurchased, "Winner has already purchased a punk");
+      if(winnerPurchased) revert WinnerAlreadyPurchased();
     } else {
-      revert("Only the owner and the winner can call this function");
+      revert AddressCannotBuyPunk();
     }
-    require(block.timestamp < purchaseDeadline, "deadline has passed");
-    require(amount <= totalDeposited/2, "amount exceeds budget");
+    if(block.timestamp >= purchaseDeadline) revert DeadlineHasPassed();
+    if(amount > totalDeposited/2) revert AmountExceedsBudget();
 
     punksContract.buyPunk{value: amount}(punkId);
     punksContract.transferPunk(msg.sender, punkId);
@@ -184,7 +203,7 @@ contract APunkForYouAndMe is Ownable {
   }
 
   function enterClaimsMode() public {
-    require(
+    if(!(
       // The owner can call the whole thing off before the winner has been drawn.
       (msg.sender == owner() && winner == address(0)) ||
 
@@ -192,15 +211,21 @@ contract APunkForYouAndMe is Ownable {
       (ownerPurchased && winnerPurchased) ||
 
       // ...or if the purchase deadline is set and has passed.
-      (purchaseDeadline != 0 && block.timestamp > purchaseDeadline),
-
-      "Claims mode cannot be started yet"
-    );
+      (purchaseDeadline != 0 && block.timestamp > purchaseDeadline)
+    )) {
+      revert CannotStartClaimsMode();
+    }
     inClaimsMode = true;
+    claimDeadline = block.timestamp + 60 days;
   }
 
   function getClaimAmount(address addr) public view returns (uint claimableAmount) {
-    require(inClaimsMode, "Not in claims mode");
+    if(!inClaimsMode) revert NotInClaimsMode();
+
+    // After all funds have been claimed or if they were swept there is nothing left to claim
+    if(address(this).balance == 0) {
+      return 0;
+    }
 
     // The winner doesn't get to reclaim any of their deposit. They are taking home a punk!
     if(addr == winner) {
@@ -216,20 +241,26 @@ contract APunkForYouAndMe is Ownable {
     return (postPunkPurchasesBalance * addressesToAmountDeposited[addr]) / (totalDeposited - addressesToAmountDeposited[winner]);
   }
 
-  // TODO add a sweep function that can be called after the claim period ends
-  // TODO nix the winner's deposit and give it to everyone else
   function claim() public {
-    require(inClaimsMode, "Not in claims mode");
-    
+    if(!inClaimsMode) revert NotInClaimsMode();
+
     uint256 claimableAmount = getClaimAmount(msg.sender);
-    require(claimableAmount > 0, "Nothing to claim");
+    if(claimableAmount == 0) revert NothingToClaim();
 
     addressesToClaimedStatus[msg.sender] = true;
     (bool success,) = msg.sender.call{value: claimableAmount}("");
     if(!success) {
-      revert("Failed to claim");
+      revert FailedToClaim();
     }
     emit EthClaimed(msg.sender, claimableAmount);
+  }
+
+  function sweep() public onlyOwner() {
+    if(block.timestamp < claimDeadline) revert ClaimsPeriodStillActive();
+    (bool success,) = msg.sender.call{value: address(this).balance}("");
+    if(!success) {
+      revert FailedToSweep();
+    }
   }
 
   receive() external payable {

@@ -326,7 +326,7 @@ function Root() {
       </div>
 
       <h2>How this works</h2>
-      <p>You get points proportional to the amount of ETH you contribute.</p>
+      <p>You get points proportional to the amount of ETH you contribute and for any ETH contributed using your referral code.</p>
       <p>Once <a href={`${NETWORK.EXPLORER_URL}/address/${NETWORK.RAFFLE_CONTRACT_ADDRESS}`} target="_blank" rel="noreferrer">the contract's</a> balance reaches <strong>150 ETH</strong>, a random address will be selected from the contributors as the winner. Your odds are proportional to your points.</p>
       <p><strong>The winner will be allocated 75 ETH from the contract to purchase a punk from the <a href="https://cryptopunks.app/cryptopunks/forsale" target="_blank" rel="noreferrer">Cryptopunks marketplace</a>.</strong></p>
       <p>The other 75 ETH will be allocated to me to be used in the same way.</p>
@@ -334,7 +334,7 @@ function Root() {
       <p>Any leftover ETH after the punks have been purchased can be claimed by the other contributors proportional to their contributions.</p>
 
       <h2>Early Contributor Period</h2>
-      <p>For a limited time, you get double points when you contribute. That's it.</p>
+      <p>For a limited time, you get double points when you contribute, no referral code required.</p>
       <h2>Referral Period</h2>
       <p>Eventually the double points bonus for contributors will be replaced with a referral system. It will work like this:</p>
       <ul>

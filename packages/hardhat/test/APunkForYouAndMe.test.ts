@@ -13,7 +13,7 @@ const SECOND = 1;
 const MINUTE = SECOND * 60;
 const HOUR = MINUTE * 60;
 const DAY = HOUR * 24;
-const BEYOND_DEADLINE = DAY * 60; // Deadling is 30 days
+const BEYOND_DEADLINE = DAY * 600; // Deadling is 30 days
 
 function loadWalletsFromFile(filePath: string, numWalletsToLoad: any = undefined) {
   const privateKeys = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
@@ -676,7 +676,7 @@ describe("APunkForYouAndMe", function () {
       await raffleContract.selectWinner();
       const purchaseDeadline = solidityDateToJS(await raffleContract.purchaseDeadline());
       const difference = differenceInDays(purchaseDeadline, new Date);
-      expect(difference).to.equal(30);
+      expect(difference).to.equal(365);
     });
     it("should be callable by anyone but only once per contract iteraction", async function() {
       // There are other tests that call selectWinner using the deployer address,
@@ -1512,6 +1512,7 @@ describe("APunkForYouAndMe", function () {
       expect(processedAnyoneElse, "At least one other should be processed").to.be.true;
 
       const amountRemaining = postPunkPurchasesBalance.sub(claimableAmountPerAddress.mul(wallets.length - 1));
+      console.log("Remaining balance after claims:", formatEther(amountRemaining));
       expect(
         amountRemaining,
         "Only dust should be left that could not be divided among all claimers should be left"
@@ -1519,6 +1520,32 @@ describe("APunkForYouAndMe", function () {
 
       const rcb0 = await ethers.provider.getBalance(raffleContract.address);
       expect(rcb0).to.equal(amountRemaining);
+
+      // The owner can't sweep for 60 days.
+      await expect(
+        raffleContract.sweep()
+      ).to.eventually.be.rejected;
+
+      // Advance time so sweeping is possible
+      await ethers.provider.send("evm_increaseTime", [BEYOND_DEADLINE]);
+      await ethers.provider.send("evm_mine");
+
+      const ownerBalance1 = await ethers.provider.getBalance(owner.address);
+      const tx = await raffleContract.sweep();
+      const receipet = await tx.wait();
+      const totalGas = receipet.cumulativeGasUsed.mul(receipet.effectiveGasPrice);
+      const ownerBalance2 = await ethers.provider.getBalance(owner.address);
+
+      console.log("Owner balance before sweep:", formatEther(ownerBalance1));
+      console.log("Gas spent:", formatEther(totalGas));
+      console.log("Owner balance after sweep:", formatEther(ownerBalance2));
+      console.log("Amount swept:", formatEther(ownerBalance2.sub(ownerBalance1).add(totalGas)));
+
+      expect(ownerBalance1.sub(totalGas).add(amountRemaining)).to.be.equal(ownerBalance2);
+
+      const rcb1 = await ethers.provider.getBalance(raffleContract.address);
+      console.log("Final contract balance:", formatEther(rcb1));
+      expect(rcb1).to.equal(0);
 
       /*const addresses = Object.keys(winnerCounts);
       for (let i = 0; i < addresses.length; i++) {
