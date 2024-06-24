@@ -2,16 +2,10 @@
 pragma solidity >=0.8.19 <0.9.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
-//import "hardhat/console.sol";
-
-interface IPunkContract {
-  function buyPunk(uint256 punkId) external payable;
-  function transferPunk(address recipient, uint256 punkId) external;
-}
-
-interface IPointsCalculator {
-  function calculatePoints(address addr, uint value) external view returns (address[] memory, uint[] memory);
-}
+import "./IPunkContract.sol";
+import "./IPointsCalculator.sol";
+import "./IReferrerLookup.sol";
+import "./IFacilitated.sol";
 
 error InvalidReferrer(); // The referrer in storage must be unset or be the same referrer the sender previously used.
 error CannotReferSelf(); // Points program operators hate this one weird trick!
@@ -20,6 +14,10 @@ error OnlyEOAs(); // Let's not get into a mess where a smart contract address wi
 error NoDoubleDipping(); // Do not allow the contract owner to deposit. It will break `buyPunk` if they win.
 error NotEnoughEth(); // Minimimum deposit size so we don't end up with people depositing miniscule amounts.
 error TargetAlreadyMet(); // Do not allow more deposits after the balance reaches the target.
+error AlreadyCommitted(); // The block to use for randomness is already valid (unset or fewer than 256 blocks before the current block)
+error HaveNotCommittedToABlock(); // We can't select a winner until the we've committed to a block
+error HaveNotPassedCommittedBlock(); // We cannot pick a winner until the current block passes the revealBlock so we can call blockhash on that block
+error MissedCommittedBlock(); // We're too far beyond the committed block to use blockhash so have to re-set revealBlock
 error WinnerAlreadySelected(); // No deposits after the winner has already been selected.
 error TargetNotMet(); // Do not allow the winner to be selected until the balance reacheds the target.
 error OwnerAlreadyPurchased(); // Only allow the owner to purchase one punk.
@@ -34,24 +32,24 @@ error FailedToClaim(); // Make sure transferring ETH is successful when calling 
 error ClaimsPeriodStillActive(); // The owner cannot sweep funds until after claims mode has run for two months.
 error FailedToSweep(); // Make sure transferring ETH is successful when calling `sweep`.
 
-contract APunkForYouAndMe is Ownable {
+contract APunkForYouAndMe is Ownable, IReferrerLookup, IFacilitated {
   event Deposited(address user, uint amount);
-  event WinnerSelected(address winner);
+  event WinnerSelected(address winner, address selectWinnerCaller);
   event PunkPurchased(address buyer, uint punkId);
   event EthClaimed(address addr, uint amount);
 
   struct Entry {
     address addr;
-    uint256 start;
-    uint256 end;
+    uint128 start;
+    uint128 end;
   }
 
   IPointsCalculator public pointsCalculator;
 
   IPunkContract public punksContract;
 
-  uint256 public totalPoints;
-  mapping(address => uint256) public addressesToPoints;
+  uint128 public totalPoints;
+  mapping(address => uint128) public addressesToPoints;
 
   uint256 public targetBalance;
   uint256 public totalDeposited;
@@ -59,7 +57,9 @@ contract APunkForYouAndMe is Ownable {
   mapping(address => uint256) public addressesToAmountDeposited;
   mapping(address => bool) public addressesToClaimedStatus;
 
+  uint64 public revealBlock;
   address public winner;
+  address public selectWinnerCaller;
   uint256 public purchaseDeadline;
   bool public ownerPurchased;
   bool public winnerPurchased;
@@ -100,6 +100,10 @@ contract APunkForYouAndMe is Ownable {
     return addressesToPoints[addr];
   }
 
+  function getFacilitator() external view returns (address _address) {
+    return selectWinnerCaller;
+  }
+
   function depositWithReferrer(address referrer) public payable {
     if(referrers[msg.sender] != address(0) && referrers[msg.sender] != referrer) revert InvalidReferrer();
     if(msg.sender == referrer) revert CannotReferSelf();
@@ -117,8 +121,11 @@ contract APunkForYouAndMe is Ownable {
     if(winner != address(0)) revert WinnerAlreadySelected();
 
     address[] memory addresses;
-    uint256[] memory pointAmounts;
+    uint128[] memory pointAmounts;
     (addresses, pointAmounts) = pointsCalculator.calculatePoints(msg.sender, msg.value);
+
+    uint128 _totalPoints = totalPoints;
+
     for(uint i = 0; i < addresses.length;) {
       if(addresses[i] == address(0)) {
         break;
@@ -126,16 +133,18 @@ contract APunkForYouAndMe is Ownable {
 
       Entry memory newEntry = Entry(
         addresses[i],
-        totalPoints,
-        totalPoints + pointAmounts[i]
+        _totalPoints,
+        _totalPoints + pointAmounts[i]
       );
       entries.push(newEntry);
 
       addressesToPoints[addresses[i]] += pointAmounts[i];
-      totalPoints += pointAmounts[i];
+      _totalPoints += pointAmounts[i];
 
       unchecked { i++; }
     }
+
+    totalPoints = _totalPoints;
 
     totalDeposited += msg.value;
     addressesToAmountDeposited[msg.sender] += msg.value;
@@ -143,14 +152,31 @@ contract APunkForYouAndMe is Ownable {
     emit Deposited(msg.sender, msg.value);
   }
 
-  function selectWinner() public {
+  function commitToBlock() public {
     if(address(this).balance < targetBalance) revert TargetNotMet();
+    if(winner != address(0)) revert WinnerAlreadySelected();
+
+    if (revealBlock == 0 || block.number > revealBlock + 256) {
+        revealBlock = uint64(block.number + 50);
+    } else {
+        revert AlreadyCommitted();
+    }
+  }
+
+  function selectWinner() public {
+    if(revealBlock == 0) revert HaveNotCommittedToABlock();
+    if(block.number <= revealBlock) revert HaveNotPassedCommittedBlock();
+    if(block.number > revealBlock + 256) revert MissedCommittedBlock();
     if(winner != address(0)) revert WinnerAlreadySelected();
 
     // Pick a number between 0 and the the total number of points
     uint256 randomNum = uint256(
       keccak256(
-        abi.encodePacked(block.timestamp, block.prevrandao)
+        abi.encodePacked(
+          blockhash(revealBlock),
+          block.prevrandao,
+          block.timestamp
+        )
       )
     ) % totalPoints;
 
@@ -174,8 +200,9 @@ contract APunkForYouAndMe is Ownable {
 
     postPunkPurchasesBalance = address(this).balance;
     purchaseDeadline = block.timestamp + 365 days;
+    selectWinnerCaller = msg.sender;
 
-    emit WinnerSelected(winner);
+    emit WinnerSelected(winner, selectWinnerCaller);
   }
 
   function buyPunk(uint punkId, uint amount) public {
@@ -189,9 +216,6 @@ contract APunkForYouAndMe is Ownable {
     if(block.timestamp >= purchaseDeadline) revert DeadlineHasPassed();
     if(amount > totalDeposited/2) revert AmountExceedsBudget();
 
-    punksContract.buyPunk{value: amount}(punkId);
-    punksContract.transferPunk(msg.sender, punkId);
-
     postPunkPurchasesBalance -= amount;
 
     if (msg.sender == owner()) {
@@ -199,6 +223,9 @@ contract APunkForYouAndMe is Ownable {
     } else if (msg.sender == winner) {
       winnerPurchased = true;
     }
+
+    punksContract.buyPunk{value: amount}(punkId);
+    punksContract.transferPunk(msg.sender, punkId);
 
     emit PunkPurchased(msg.sender, punkId);
   }
@@ -223,7 +250,7 @@ contract APunkForYouAndMe is Ownable {
   function getClaimAmount(address addr) public view returns (uint claimableAmount) {
     if(!inClaimsMode) revert NotInClaimsMode();
 
-    // After all funds have been claimed or if they were swept there is nothing left to claim
+    // After all funds have been claimed or swept there is nothing left to claim
     if(address(this).balance == 0) {
       return 0;
     }

@@ -15,6 +15,9 @@ const HOUR = MINUTE * 60;
 const DAY = HOUR * 24;
 const BEYOND_DEADLINE = DAY * 600; // Deadling is 30 days
 
+const NULL_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+
 function loadWalletsFromFile(filePath: string, numWalletsToLoad: any = undefined) {
   const privateKeys = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
   const selectedPrivateKeys = privateKeys.slice(0, typeof numWalletsToLoad === "undefined" ? privateKeys.length : numWalletsToLoad);
@@ -49,6 +52,12 @@ function solidityDateToJS(num) {
   }
 }
 
+async function mineBlocks(numBlocks = 1) {
+  for(let i = 0; i < numBlocks; i++) {
+    await ethers.provider.send("evm_mine");
+  }
+}
+
 describe("getRandomBigNumber", () => {
   it("should return results within range", () => {
     const counts = {};
@@ -78,6 +87,7 @@ describe("APunkForYouAndMe", function () {
   let punksReaderContract: any;
   let calculatorContract: any;
   let raffleContract: any;
+  let rewardContract: any;
   let owner: any;
   
   before(async () => {
@@ -108,6 +118,12 @@ describe("APunkForYouAndMe", function () {
     await raffleContract.setEntryCalculator(calculatorContract.address);
 
     await calculatorContract.setReferrerLookup(raffleContract.address);
+
+    const rewardContractFactory = await ethers.getContractFactory("AndALittleSomethingForSomeoneElse");
+    rewardContract = await rewardContractFactory.deploy();
+    await rewardContract.deployed();
+    await rewardContract.setFacilitatedContract(raffleContract.address);
+    await rewardContract.deposit({value: parseEther("0.1")});
   });
 
   describe("setPunksContract", function() {
@@ -406,6 +422,9 @@ describe("APunkForYouAndMe", function () {
         value: parseEther("250"),
         gasLimit: 1_000_000
       });
+
+      await raffleContract.commitToBlock();
+      await mineBlocks(50);
       await raffleContract.selectWinner();
 
       await expect(
@@ -449,7 +468,7 @@ describe("APunkForYouAndMe", function () {
       })).to.eventually.be.rejected;
 
       // Using the zero address is worth checking too
-      await expect(raffleContract.connect(referral).depositWithReferrer("0x0000000000000000000000000000000000000000", {
+      await expect(raffleContract.connect(referral).depositWithReferrer(NULL_ADDRESS, {
         value: depositAmount,
       })).to.eventually.be.rejected;
       
@@ -635,9 +654,113 @@ describe("APunkForYouAndMe", function () {
     });
   });
 
-  describe("selectWinner", async function() {
-    const player = (await ethers.getSigners())[1];
+  describe("commitToBlock", function() {
+    let player;
 
+    before(async () => {
+      player = (await ethers.getSigners())[1];
+    });
+
+    it("should not be callable until the target balance is reached", async function() {
+      let revealBlock = await raffleContract.revealBlock();
+      expect(revealBlock).to.equal("0");
+
+      await raffleContract.setTargetBalance(parseEther("3"));
+      await expect(raffleContract.commitToBlock()).to.eventually.be.rejected;
+      await raffleContract.connect(player).deposit({
+        value: parseEther("1")
+      });
+      await expect(raffleContract.commitToBlock()).to.eventually.be.rejected;
+
+      await raffleContract.connect(player).deposit({
+        value: parseEther("1")
+      });
+      await expect(raffleContract.commitToBlock()).to.eventually.be.rejected;
+
+      await raffleContract.connect(player).deposit({
+        value: parseEther("1")
+      });
+      
+      await raffleContract.commitToBlock();
+      revealBlock = await raffleContract.revealBlock();
+      expect(revealBlock).to.not.equal("0");
+    });
+
+    it("should not be callable while the revealBlock is still valid", async function() {
+      let revealBlock = await raffleContract.revealBlock();
+      expect(revealBlock).to.equal("0");
+
+      await raffleContract.setTargetBalance(parseEther("1"));
+      await raffleContract.connect(player).deposit({ value: parseEther("1") });
+
+      await raffleContract.commitToBlock();
+      revealBlock = await raffleContract.revealBlock();
+      expect(revealBlock).to.not.equal("0");
+      
+      for(let i = 0; i < (50 + 256); i++) {
+        let blockNumber1 = await ethers.provider.getBlockNumber();
+
+        // awaiting commitToBlock will wait for that tx to be mined, thus increasing the blockNumber by 1 each loop
+        await expect(raffleContract.commitToBlock(), i).to.eventually.be.rejected;
+
+        let blockNumber2 = await ethers.provider.getBlockNumber();
+        expect(blockNumber2).to.equal(blockNumber1 + 1);
+      }
+      await raffleContract.commitToBlock();
+      let newRevealBlock = await raffleContract.revealBlock();
+      expect(newRevealBlock).to.not.equal("0");
+      expect(newRevealBlock).to.not.equal(revealBlock);
+    });
+  
+    it("should not be callable after the winner is selected", async function() {
+      let revealBlock = await raffleContract.revealBlock();
+      expect(revealBlock).to.equal("0");
+
+      await raffleContract.setTargetBalance(parseEther("1"));
+      await raffleContract.connect(player).deposit({ value: parseEther("2") });
+
+      await raffleContract.commitToBlock();
+      revealBlock = await raffleContract.revealBlock();
+      expect(revealBlock).to.not.equal("0");
+      
+      await mineBlocks(50);
+      await raffleContract.selectWinner();
+      await expect(raffleContract.commitToBlock()).to.eventually.be.rejected;
+
+      await mineBlocks(350);
+      await expect(raffleContract.commitToBlock()).to.eventually.be.rejected;
+    });
+  });
+
+  describe("selectWinner", function() {
+    let player;
+
+    before(async () => {
+      player = (await ethers.getSigners())[1];
+    });
+
+    it("should set the facilitator to the caller", async function() {
+      let facilitator = (await ethers.getSigners())[1];
+
+      expect(await raffleContract.getFacilitator()).to.equals(NULL_ADDRESS);
+      await raffleContract.setTargetBalance(parseEther("1"));
+      expect(await raffleContract.getFacilitator()).to.equals(NULL_ADDRESS);
+      await raffleContract.connect(player).deposit({ value: parseEther("1") });
+      expect(await raffleContract.getFacilitator()).to.equals(NULL_ADDRESS);
+      await raffleContract.commitToBlock();
+      expect(await raffleContract.getFacilitator()).to.equals(NULL_ADDRESS);
+      await mineBlocks(70);
+      await raffleContract.connect(facilitator).selectWinner();
+      expect(await raffleContract.getFacilitator()).to.equals(facilitator.address);
+
+      const facilitatorBalance1 = await ethers.provider.getBalance(facilitator.address);
+      const tx = await rewardContract.connect(facilitator).claim();
+      const receipet = await tx.wait();
+      const totalGas = receipet.cumulativeGasUsed.mul(receipet.effectiveGasPrice);
+      const facilitatorBalance2 = await ethers.provider.getBalance(facilitator.address);
+
+      expect(facilitatorBalance2.add(totalGas).sub(facilitatorBalance1)).to.be.equal(parseEther("0.1"));
+    });
     it("should not be callable until the target balance is reached", async function() {
       await raffleContract.setTargetBalance(parseEther("3"));
       await expect(raffleContract.selectWinner()).to.eventually.be.rejected;
@@ -657,22 +780,27 @@ describe("APunkForYouAndMe", function () {
         to: raffleContract.address,
         value: parseEther("1")
       });
+      await raffleContract.commitToBlock();
+      await mineBlocks(70);
       await raffleContract.selectWinner();
     });
     it("should update the winner to be one of the depositors", async function() {
+      let revealBlock = await raffleContract.revealBlock();
+      expect(revealBlock).to.equal("0");
+
       await raffleContract.setTargetBalance(parseEther("3"));
-      await raffleContract.connect(player).deposit({
-        value: parseEther("3")
-      });
+      await raffleContract.connect(player).deposit({ value: parseEther("3") });
+      await raffleContract.commitToBlock();
+      await mineBlocks(75);
       await raffleContract.selectWinner();
       const winner = await raffleContract.winner();
-      expect(winner).to.equal(owner.address);
+      expect(winner).to.equal(player.address);
     });
-    it("should set the purchaseDeadline to be 30 days out", async function() { // TODO Decide how long to actually set the purchaseDeadline
+    it("should set the purchaseDeadline to be 365 days out", async function() {
       await raffleContract.setTargetBalance(parseEther("3"));
-      await raffleContract.connect(player).deposit({
-        value: parseEther("3")
-      });
+      await raffleContract.connect(player).deposit({ value: parseEther("3") });
+      await raffleContract.connect(player).commitToBlock();
+      await mineBlocks(99);
       await raffleContract.selectWinner();
       const purchaseDeadline = solidityDateToJS(await raffleContract.purchaseDeadline());
       const difference = differenceInDays(purchaseDeadline, new Date);
@@ -689,19 +817,35 @@ describe("APunkForYouAndMe", function () {
       });
 
       await raffleContract.setTargetBalance(parseEther("1"));
-      await raffleContract.connect(selectWinnerCallerWallet).deposit({
-        value: parseEther("1")
-      });
+      await raffleContract.connect(selectWinnerCallerWallet).deposit({ value: parseEther("1") });
+      await raffleContract.commitToBlock();
+      await mineBlocks(80);
       await raffleContract.connect(selectWinnerCallerWallet).selectWinner();
       const winner = await raffleContract.winner();
       expect(winner).to.equal(selectWinnerCallerWallet.address);
+
+      await expect(
+        raffleContract.connect(selectWinnerCallerWallet).selectWinner()
+      ).to.eventually.be.rejected;
+
+      await mineBlocks(300);
+      await expect(
+        raffleContract.commitToBlock()
+      ).to.eventually.be.rejected;
+
+      await expect(
+        raffleContract.connect(selectWinnerCallerWallet).selectWinner()
+      ).to.eventually.be.rejected;
     });
     it("should prevent future deposits and changing of the target balance", async function() {
       await raffleContract.setTargetBalance(parseEther("1"));
       await raffleContract.connect(player).deposit({
         value: parseEther("1")
       });
+      await raffleContract.commitToBlock();
+      await mineBlocks(99);
       await raffleContract.selectWinner();
+      
       await expect(
         raffleContract.connect(player).deposit({
           value: parseEther("1")
@@ -757,6 +901,8 @@ describe("APunkForYouAndMe", function () {
       }
 
       // Pick winner
+      await raffleContract.commitToBlock();
+      await mineBlocks(50);
       await raffleContract.selectWinner();
     });
 
@@ -933,6 +1079,8 @@ describe("APunkForYouAndMe", function () {
       await raffleContract.connect(nonOwner).deposit({
         value: parseEther("3")
       });
+      await raffleContract.commitToBlock();
+      await mineBlocks(150);
       await raffleContract.selectWinner();
 
       let inClaimsMode;
@@ -978,6 +1126,8 @@ describe("APunkForYouAndMe", function () {
       await raffleContract.connect(nonOwner).deposit({
         value: parseEther("3")
       });
+      await raffleContract.commitToBlock();
+      await mineBlocks(100);
       await raffleContract.selectWinner();
       
       // Winner buys punk but owner does not
@@ -1010,6 +1160,8 @@ describe("APunkForYouAndMe", function () {
       await raffleContract.connect(nonOwner).deposit({
         value: parseEther("3")
       });
+      await raffleContract.commitToBlock();
+      await mineBlocks(50);
       await raffleContract.selectWinner();
       
       // Owner buys punk but winner does not
@@ -1044,6 +1196,8 @@ describe("APunkForYouAndMe", function () {
       await raffleContract.connect(winner).deposit({
         value: parseEther("3")
       });
+      await raffleContract.commitToBlock();
+      await mineBlocks(50);
       await raffleContract.selectWinner();
       
       await raffleContract.buyPunk(0, PUNK_COST);
@@ -1125,6 +1279,8 @@ describe("APunkForYouAndMe", function () {
       }
 
       // Pick winner
+      await raffleContract.commitToBlock();
+      await mineBlocks(50);
       await raffleContract.selectWinner();
       const winnerAddress = await raffleContract.winner();
       winner = wallets.find(w => w.address === winnerAddress);
@@ -1401,6 +1557,8 @@ describe("APunkForYouAndMe", function () {
       console.log(d.depositor, d.start.toString(), d.end.toString())
       console.log("---")
       */
+      await raffleContract.commitToBlock();
+      await mineBlocks(50);
 
       console.time("Drawing winner");
       let winner;
@@ -1557,46 +1715,22 @@ describe("APunkForYouAndMe", function () {
 });
 
 describe("APunkForYouAndMe - Multiple iterations", function() {
-
   let gasliteDropContract: any;
   let punksContract: any;
-  //let punksReaderContract: any;
   let owner: any;
-  //let punkHolder: any;
-  
+
   before(async () => {
     owner = (await ethers.getSigners())[0];
 
     const gasliteDropContractFactory = await ethers.getContractFactory("GasliteDrop");
     gasliteDropContract = await gasliteDropContractFactory.deploy();
     gasliteDropContract.deployed();
-  })
+  });
 
   beforeEach(async () => {
     const cryptoPunksMarketContractFactory = await ethers.getContractFactory("CryptoPunksMarket");
     punksContract = await cryptoPunksMarketContractFactory.deploy()
     await punksContract.deployed();
-
-    /*
-    const cryptoPunksMarketReaderContractFactory = await ethers.getContractFactory("CryptoPunksMarketReader");
-    punksReaderContract = await cryptoPunksMarketReaderContractFactory.deploy();
-    await punksReaderContract.deployed();
-    await punksReaderContract.setPunksContract(punksContract.address);
- 
-    const owner = (await ethers.getSigners())[0];
-    punkHolder = ethers.Wallet.createRandom().connect(ethers.provider);
-
-    await owner.sendTransaction({
-      to: punkHolder.address,
-      value: parseEther("1")
-    });
-
-    await punksContract.setInitialOwners(
-      Array.from({ length: 100 }, () => punkHolder.address),
-      Array.from({ length: 100 }, (_, index) => index)
-    );
-    await punksContract.allInitialOwnersAssigned();
-    */
   });
 
   describe("buyPunk", async function() {
@@ -1643,6 +1777,8 @@ describe("APunkForYouAndMe - Multiple iterations", function() {
         }
 
         // Pick winner
+        await raffleContract.commitToBlock();
+        await mineBlocks(50);
         await raffleContract.selectWinner();
         const winnerAddress = await raffleContract.winner();
         winCounts[winnerAddress]++;
@@ -1689,6 +1825,10 @@ describe("APunkForYouAndMe - Multiple iterations", function() {
           });
         }
 
+        // Commmit randomness
+        await raffleContract.commitToBlock();
+        await mineBlocks(50);
+
         // Pick winner
         await raffleContract.selectWinner();
         const winnerAddress = await raffleContract.winner();
@@ -1712,4 +1852,286 @@ describe("APunkForYouAndMe - Multiple iterations", function() {
       expect(whaleBidderWins > everyoneElseWins).to.be.true;
     });
   });
+});
+
+describe("AndALittleSomethingForSomeoneElse", function () {
+  let dfc:any
+  let rewardContract:any;
+  let owner:any
+  let facilitator:any;
+
+  before(async () => {
+    owner = (await ethers.getSigners())[0];
+    facilitator = (await ethers.getSigners())[1];
+  });
+
+  beforeEach(async () => {
+    const dfcContractFactory = await ethers.getContractFactory("DummyFacilitatedContract");
+    dfc = await dfcContractFactory.deploy()
+    await dfc.deployed();
+    await dfc.setFacilitator(facilitator.address);
+
+    const rewardContractFactory = await ethers.getContractFactory("AndALittleSomethingForSomeoneElse");
+    rewardContract = await rewardContractFactory.deploy();
+    await rewardContract.deployed();
+    await rewardContract.setFacilitatedContract(dfc.address);
+  });
+
+  describe("deposit", function() {
+    it("should only be callable by the owner", async function() {
+      expect(await rewardContract.deposit({value: parseEther("1")}));
+      await expect(rewardContract.connect(facilitator).deposit({value: parseEther("1")})).to.eventually.be.rejected;
+    });
+    it("should increase the contract's balance", async function() {
+      expect(
+        await ethers.provider.getBalance(rewardContract.address)
+      ).to.equal("0");
+      await rewardContract.deposit({value: parseEther("1")});
+      expect(
+        await ethers.provider.getBalance(rewardContract.address)
+      ).to.equal(parseEther("1"));
+      await rewardContract.deposit({value: parseEther("1")});
+      expect(
+        await ethers.provider.getBalance(rewardContract.address)
+      ).to.equal(parseEther("2"));
+    });
+  });
+
+  describe("withdraw", function() {
+    it("should only be callable by the owner", async () => {
+      await rewardContract.deposit({value: parseEther(".1")});
+      await expect(rewardContract.connect(facilitator).withdraw()).to.eventually.be.rejected;
+      await rewardContract.withdraw();
+    });
+
+    it("should increase the owner's balance", async () => {
+      await rewardContract.deposit({value: parseEther(".1")});
+      expect(await ethers.provider.getBalance(rewardContract.address)).to.equal(parseEther("0.1"));
+      const b1 = await ethers.provider.getBalance(owner.address);
+      const tx = await rewardContract.withdraw();
+      const receipet = await tx.wait();
+      const totalGas = receipet.cumulativeGasUsed.mul(receipet.effectiveGasPrice);
+      const b2 = await ethers.provider.getBalance(owner.address);
+      expect(b2.add(totalGas).sub(b1)).to.be.equal(parseEther("0.1"));
+    });
+  });
+
+  describe("claim", function() {
+    it("should only be callable by the facilitator", async () => {
+      expect(await ethers.provider.getBalance(rewardContract.address)).to.equal(parseEther("0"));
+      await rewardContract.deposit({value: parseEther("0.1")});
+      await expect(rewardContract.claim()).to.eventually.be.rejected;
+      await rewardContract.connect(facilitator).claim();
+    });
+
+    it("should increase the facilitator's balance", async () => {
+      expect(await ethers.provider.getBalance(rewardContract.address)).to.equal(parseEther("0"));
+      await rewardContract.deposit({value: parseEther("0.1")});
+      const b1 = await ethers.provider.getBalance(facilitator.address);
+      const tx = await rewardContract.connect(facilitator).claim();
+      const receipet = await tx.wait();
+      const totalGas = receipet.cumulativeGasUsed.mul(receipet.effectiveGasPrice);
+      const b2 = await ethers.provider.getBalance(facilitator.address);
+      expect(b2.add(totalGas).sub(b1)).to.be.equal(parseEther("0.1"));
+    });
+    it("should fail if the contract is empty", async () => {
+      await expect(rewardContract.connect(facilitator).claim()).to.eventually.be.rejected;
+      await rewardContract.deposit({value: parseEther("0.1")});
+      await rewardContract.connect(facilitator).claim();
+      expect(await ethers.provider.getBalance(rewardContract.address)).to.equal(0);
+      await expect(rewardContract.connect(facilitator).claim()).to.eventually.be.rejected;
+    })
+  });
+
+  describe("states", function() {
+    describe("unsealed", async function() {
+      it("should allow the owner to transition it to sealed", async () => {
+        await expect(rewardContract.connect(facilitator).seal()).to.eventually.be.rejected;
+
+        await rewardContract.seal();
+        expect(await rewardContract.getState()).to.equal("Sealed");
+      });
+
+      it("should allow the facilitator to transition it to claimed", async () => {
+        await rewardContract.deposit({value: parseEther(".1")});
+
+        await expect(rewardContract.claim()).to.eventually.be.rejected;
+        
+        await rewardContract.connect(facilitator).claim();
+        expect(await rewardContract.getState()).to.equal("Claimed");
+      });
+
+      it("should not transition to unsealing", async () => {
+        await expect(rewardContract.connect(facilitator).unseal()).to.eventually.be.rejected;
+        await expect(rewardContract.unseal()).to.eventually.be.rejected;
+      });
+
+      it("should allow the owner to withdraw", async () => {
+        await rewardContract.deposit({value: parseEther("0.1")});
+
+        const b1 = await ethers.provider.getBalance(owner.address);
+        const tx = await rewardContract.withdraw();
+        const receipet = await tx.wait();
+        const totalGas = receipet.cumulativeGasUsed.mul(receipet.effectiveGasPrice);
+        const b2 = await ethers.provider.getBalance(owner.address);
+        expect(b2.add(totalGas).sub(b1)).to.be.equal(parseEther("0.1"));
+
+        await rewardContract.deposit({value: parseEther("0.1")});
+        await expect(rewardContract.connect(facilitator).withdraw()).to.eventually.be.rejected;
+      });
+
+      it("should allow the owner to set the facilitated contract", async () => {
+        await rewardContract.setFacilitatedContract(NULL_ADDRESS);
+        expect(await rewardContract.facilitatedContract()).to.equal(NULL_ADDRESS);
+
+        await rewardContract.setFacilitatedContract(rewardContract.address);
+        expect(await rewardContract.facilitatedContract()).to.equal(rewardContract.address);
+
+        await rewardContract.setFacilitatedContract(facilitator.address);
+        expect(await rewardContract.facilitatedContract()).to.equal(facilitator.address);
+
+        await expect(
+          rewardContract.connect(facilitator).setFacilitatedContract(NULL_ADDRESS)
+        ).to.eventually.be.rejected;
+      });
+
+      it("should allow the owner to deposit", async () => {
+        await rewardContract.deposit({value: parseEther("0.1")});
+        expect(
+          await ethers.provider.getBalance(rewardContract.address)
+        ).to.equal(parseEther("0.1"));
+        await rewardContract.deposit({value: parseEther("1")});
+        expect(
+          await ethers.provider.getBalance(rewardContract.address)
+        ).to.equal(parseEther("1.1"));
+
+        await expect(
+          rewardContract.connect(facilitator).deposit({value: parseEther("1")})
+        ).to.eventually.be.rejected;
+      });
+    });
+
+    describe("sealed", async () => {
+      beforeEach(async function() {
+        await rewardContract.deposit({value: parseEther(".1")});
+        await rewardContract.seal();
+        expect(await rewardContract.getState()).to.equal("Sealed");
+      });
+
+      it("should allow the owner to transition it to unsealing", async () => {
+        await expect(rewardContract.connect(facilitator).unseal()).to.eventually.be.rejected;
+
+        await rewardContract.unseal();
+        expect(await rewardContract.getState()).to.equal("Unsealing");
+      });
+
+      it("should allow the facilitator to transition it to claimed", async () => {
+        await expect(rewardContract.claim()).to.eventually.be.rejected;
+
+        await rewardContract.connect(facilitator).claim();
+        expect(await rewardContract.getState()).to.equal("Claimed");
+      });
+
+      it("should not allow withdraw", async () => {
+        await expect(rewardContract.withdraw()).to.eventually.be.rejected;
+        await expect(rewardContract.connect(facilitator).withdraw()).to.eventually.be.rejected;
+      });
+      it("should not allow setting the facilitated contract", async () => {
+        await expect(rewardContract.setFacilitatedContract(NULL_ADDRESS)).to.eventually.be.rejected;
+        await expect(rewardContract.connect(facilitator).setFacilitatedContract(NULL_ADDRESS)).to.eventually.be.rejected;
+      });
+      it("should allow the owner to deposit", async () => {
+        expect(
+          await ethers.provider.getBalance(rewardContract.address)
+        ).to.equal(parseEther("0.1"));
+        await rewardContract.deposit({value: parseEther("1")});
+        expect(
+          await ethers.provider.getBalance(rewardContract.address)
+        ).to.equal(parseEther("1.1"));
+
+        await expect(
+          rewardContract.connect(facilitator).deposit({value: parseEther("1")})
+        ).to.eventually.be.rejected;
+      });
+    });
+
+    describe("unsealing", async () => {
+      beforeEach(async function() {
+        await rewardContract.deposit({value: parseEther(".1")});
+        await rewardContract.seal();
+        await rewardContract.unseal();
+        expect(await rewardContract.getState()).to.equal("Unsealing");
+      });
+      it("should allow the owner to transition it to sealed", async () => {
+        await expect(rewardContract.connect(facilitator).seal()).to.eventually.be.rejected;
+
+        await rewardContract.seal();
+        expect(await rewardContract.getState()).to.equal("Sealed");
+      });
+      it("should transition to unsealed after 7 days", async () => {
+        await ethers.provider.send("evm_increaseTime", [DAY]);
+        await mineBlocks();
+        expect(await rewardContract.getState()).to.equal("Unsealing");
+
+        await ethers.provider.send("evm_increaseTime", [6 * DAY]);
+        await mineBlocks();
+        expect(await rewardContract.getState()).to.equal("Unsealed");
+      });
+      it("should allow the facilitator to transition it to claimed", async () => {
+        await expect(rewardContract.claim()).to.eventually.be.rejected;
+
+        await rewardContract.connect(facilitator).claim();
+        expect(await rewardContract.getState()).to.equal("Claimed");
+      });
+      it("should not allow withdraw", async () => {
+        await expect(rewardContract.withdraw()).to.eventually.be.rejected;
+        await expect(rewardContract.connect(facilitator).withdraw()).to.eventually.be.rejected;
+      });
+      it("should not allow setting the facilitated contract", async () => {
+        await expect(rewardContract.setFacilitatedContract(NULL_ADDRESS)).to.eventually.be.rejected;
+        await expect(rewardContract.connect(facilitator).setFacilitatedContract(NULL_ADDRESS)).to.eventually.be.rejected;
+      });
+      it("should allow the owner to deposit", async () => {
+        let balance = await ethers.provider.getBalance(rewardContract.address);
+        expect(balance).to.equal(parseEther("0.1"));
+        await rewardContract.deposit({value: parseEther("1")});
+        balance = await ethers.provider.getBalance(rewardContract.address);
+        expect(balance).to.equal(parseEther("1.1"));
+
+        await expect(
+          rewardContract.connect(facilitator).deposit({value: parseEther("1")})
+        ).to.eventually.be.rejected;
+      });
+    });
+    describe("claimed", async function() {
+      beforeEach(async function() {
+        await rewardContract.deposit({value: parseEther(".1")});
+        await rewardContract.connect(facilitator).claim();
+        expect(await rewardContract.getState()).to.equal("Claimed");
+      });
+      it("should not transition to any other state", async () => {
+        await expect(rewardContract.connect(facilitator).seal()).to.eventually.be.rejected;
+        await expect(rewardContract.connect(facilitator).unseal()).to.eventually.be.rejected;
+        await expect(rewardContract.seal()).to.eventually.be.rejected;
+        await expect(rewardContract.unseal()).to.eventually.be.rejected;
+      });
+      it("should not allow withdraw", async () => {
+        await expect(rewardContract.withdraw()).to.eventually.be.rejected;
+        await expect(rewardContract.connect(facilitator).withdraw()).to.eventually.be.rejected;
+      });
+      it("should not allow setting the facilitated contract", async () => {
+        await expect(rewardContract.setFacilitatedContract(NULL_ADDRESS)).to.eventually.be.rejected;
+        await expect(rewardContract.connect(facilitator).setFacilitatedContract(NULL_ADDRESS)).to.eventually.be.rejected;
+      });
+      it("should not allow deposits", async () => {
+        await expect(
+          rewardContract.deposit({value: parseEther("1")})
+        ).to.eventually.be.rejected;
+        await expect(
+          rewardContract.connect(facilitator).deposit({value: parseEther("1")})
+        ).to.eventually.be.rejected;
+      });
+    });
+  });
+
 });
