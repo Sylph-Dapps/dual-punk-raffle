@@ -1,36 +1,19 @@
+/*
+Implement allowlist
+Implement project mode
+ - compile list of founders and key community members and map to contract addresses
+ - require ping from address to enable for each project
+*/
+
 //SPDX-License-Identifier: MIT
 pragma solidity >=0.8.19 <0.9.0;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "./IPunkContract.sol";
-import "./IPointsCalculator.sol";
 import "./IReferrerLookup.sol";
 import "./IFacilitated.sol";
-
-error InvalidReferrer(); // The referrer in storage must be unset or be the same referrer the sender previously used.
-error CannotReferSelf(); // Points program operators hate this one weird trick!
-error ReferrerMustHaveDeposited(); // In order to refer others, a user must have first deposited into the contract.
-error OnlyEOAs(); // Let's not get into a mess where a smart contract address wins a punk and bad logic locks it away. EOAs only.
-error NoDoubleDipping(); // Do not allow the contract owner to deposit. It will break `buyPunk` if they win.
-error NotEnoughEth(); // Minimimum deposit size so we don't end up with people depositing miniscule amounts.
-error TargetAlreadyMet(); // Do not allow more deposits after the balance reaches the target.
-error AlreadyCommitted(); // The block to use for randomness is already valid (unset or fewer than 256 blocks before the current block)
-error HaveNotCommittedToABlock(); // We can't select a winner until the we've committed to a block
-error HaveNotPassedCommittedBlock(); // We cannot pick a winner until the current block passes the revealBlock so we can call blockhash on that block
-error MissedCommittedBlock(); // We're too far beyond the committed block to use blockhash so have to re-set revealBlock
-error WinnerAlreadySelected(); // No deposits after the winner has already been selected.
-error TargetNotMet(); // Do not allow the winner to be selected until the balance reacheds the target.
-error OwnerAlreadyPurchased(); // Only allow the owner to purchase one punk.
-error WinnerAlreadyPurchased(); // Only allow the winner to purchase one punk.
-error AddressCannotBuyPunk(); // Prevent calling `buyPunk` by anyone other than the contract owner and the winner.
-error DeadlineHasPassed(); // Require the owner and winner to buy their punks within a certain timeframe.
-error AmountExceedsBudget(); // The contract owner and the winner can each use no more than half of the amount deposited.
-error CannotStartClaimsMode(); // Claims mode can only be started under certain conditions.
-error NotInClaimsMode(); // Don't allow claims before we've entered claims mode.
-error NothingToClaim(); // Do not allow anyone to claim if there is no balance for them to claim.
-error FailedToClaim(); // Make sure transferring ETH is successful when calling `claim`.
-error ClaimsPeriodStillActive(); // The owner cannot sweep funds until after claims mode has run for two months.
-error FailedToSweep(); // Make sure transferring ETH is successful when calling `sweep`.
+import "./Errors.sol";
 
 contract APunkForYouAndMe is Ownable, IReferrerLookup, IFacilitated {
   event Deposited(address user, uint amount);
@@ -38,25 +21,36 @@ contract APunkForYouAndMe is Ownable, IReferrerLookup, IFacilitated {
   event PunkPurchased(address buyer, uint punkId);
   event EthClaimed(address addr, uint amount);
 
+  IPunkContract public punksContract;
+
+  // Vars for the various contribution modes' features
+  enum ContributionMode {
+    Allowlist, // In allowlist mode only addresses on the allowlist can contribute
+    Projects, // In projects mode holders of particular projects can contribute along with allowlist members
+    Basic, // In basic mode everyone can contribute with a 2x multiplier on points
+    Referrerals // In this mode everyone can contribute at 1x but with the referrals mechanic
+  }
+  ContributionMode private contributionMode;
+  mapping(address => bool) allowedProjects;
+  mapping(address => address) referrers;
+
+  // Vars for point tracking
   struct Entry {
     address addr;
     uint128 start;
     uint128 end;
   }
-
-  IPointsCalculator public pointsCalculator;
-
-  IPunkContract public punksContract;
-
+  Entry[] public entries;
   uint128 public totalPoints;
   mapping(address => uint128) public addressesToPoints;
 
+  // Vars for ETH tracking
   uint256 public targetBalance;
   uint256 public totalDeposited;
-  Entry[] public entries;
   mapping(address => uint256) public addressesToAmountDeposited;
   mapping(address => bool) public addressesToClaimedStatus;
 
+  // Vars for the climax and denouement: raffle resolution, punk purchasing, and ETH claiming
   uint64 public revealBlock;
   address public winner;
   address public selectWinnerCaller;
@@ -67,12 +61,10 @@ contract APunkForYouAndMe is Ownable, IReferrerLookup, IFacilitated {
   bool public inClaimsMode;
   uint256 public claimDeadline;
 
-  mapping(address => address) referrers;
-
   constructor() {}
 
-  function setEntryCalculator(address addr) external onlyOwner {
-    pointsCalculator = IPointsCalculator(addr);
+  function setContributionMode(ContributionMode mode) external onlyOwner {
+    contributionMode = mode;
   }
 
   function setPunksContract(address addr) external onlyOwner {
@@ -92,7 +84,7 @@ contract APunkForYouAndMe is Ownable, IReferrerLookup, IFacilitated {
     return addressesToAmountDeposited[addr];
   }
 
-  function getReferrer(address addr) external view returns (address referrer) {
+  function getReferrer(address addr) public view returns (address referrer) {
     return referrers[addr];
   }
 
@@ -104,7 +96,26 @@ contract APunkForYouAndMe is Ownable, IReferrerLookup, IFacilitated {
     return selectWinnerCaller;
   }
 
+  function depositFromAllowlist() public payable {
+    // Once referral mode is activated, contributing as an allowlist member would net more points,
+    // and that is unfair to the little guys who waited to get to contribute, so deactivate
+    // allowlist contributions.
+    if(contributionMode == ContributionMode.Referrerals) revert InvalidContributionMode();
+    deposit();
+  }
+
+  function depositWithProject(address project) public payable {
+    // Like allowlist mode, once referral mode is activated we need to so deactivate project-based
+    // contributions in the spirit of fairness to the general public.
+    if(contributionMode == ContributionMode.Referrerals) revert InvalidContributionMode();
+    if(!allowedProjects[project]) revert InvalidProject(); // TODO implement allowing projects
+    if(IERC721(project).balanceOf(msg.sender) == 0) revert NotAHolder();
+
+    deposit();
+  }
+
   function depositWithReferrer(address referrer) public payable {
+    if(contributionMode != ContributionMode.Referrerals) revert InvalidContributionMode();
     if(referrers[msg.sender] != address(0) && referrers[msg.sender] != referrer) revert InvalidReferrer();
     if(msg.sender == referrer) revert CannotReferSelf();
     if(addressesToAmountDeposited[referrer] == 0) revert ReferrerMustHaveDeposited();
@@ -120,36 +131,77 @@ contract APunkForYouAndMe is Ownable, IReferrerLookup, IFacilitated {
     if(address(this).balance - msg.value >= targetBalance) revert TargetAlreadyMet();
     if(winner != address(0)) revert WinnerAlreadySelected();
 
-    address[] memory addresses;
-    uint128[] memory pointAmounts;
-    (addresses, pointAmounts) = pointsCalculator.calculatePoints(msg.sender, msg.value);
+    if(contributionMode == ContributionMode.Referrerals) {
+      // Referral mode requires computing points for multiple addresses
+      address[] memory addresses;
+      uint128[] memory pointAmounts;
+      (addresses, pointAmounts) = calculateReferralModePoints(msg.sender, msg.value);
+      uint128 _totalPoints = totalPoints;
+      for(uint i = 0; i < addresses.length;) {
+        if(addresses[i] == address(0)) {
+          break;
+        }
 
-    uint128 _totalPoints = totalPoints;
+        Entry memory newEntry = Entry(
+          addresses[i],
+          _totalPoints,
+          _totalPoints + pointAmounts[i]
+        );
+        entries.push(newEntry);
+        addressesToPoints[addresses[i]] += pointAmounts[i];
+        _totalPoints += pointAmounts[i];
 
-    for(uint i = 0; i < addresses.length;) {
-      if(addresses[i] == address(0)) {
-        break;
+        unchecked { i++; }
       }
-
+      totalPoints = _totalPoints;
+    } else {
+      // Basic is a straight multiplication to determine the number of points for msg.sender
+      uint128 pointsAmount = uint128(msg.value * 2);
       Entry memory newEntry = Entry(
-        addresses[i],
-        _totalPoints,
-        _totalPoints + pointAmounts[i]
+        msg.sender,
+        totalPoints,
+        totalPoints + pointsAmount
       );
       entries.push(newEntry);
-
-      addressesToPoints[addresses[i]] += pointAmounts[i];
-      _totalPoints += pointAmounts[i];
-
-      unchecked { i++; }
+      addressesToPoints[msg.sender] += pointsAmount;
+      totalPoints += pointsAmount;
     }
-
-    totalPoints = _totalPoints;
 
     totalDeposited += msg.value;
     addressesToAmountDeposited[msg.sender] += msg.value;
 
     emit Deposited(msg.sender, msg.value);
+  }
+
+  function calculateReferralModePoints(address addr, uint value) public view returns (address[] memory, uint128[] memory) {
+    address[] memory addresses = new address[](3);
+    uint128[] memory points = new uint128[](3);
+
+    // The base points are the amount of wei sent to the contract
+    // The effective points are doubled if using a referral from someone else
+    uint128 numPoints = uint128(getReferrer(addr) == address(0) ? value : value * 2);
+    addresses[0] = addr;
+    points[0] = numPoints;
+
+    // The referrer gets 10% of the base points or the equivalant of their deposit amount in points, whichever is less
+    address referrer = getReferrer(addr);
+    if (referrer != address(0)) {
+      uint128 referrerPointsCap = uint128(getAmountDeposited(referrer));
+      uint128 referrerPossiblePoints = uint128(value / 10);
+      addresses[1] = referrer;
+      points[1] = referrerPossiblePoints < referrerPointsCap ? referrerPossiblePoints : referrerPointsCap;
+
+      // The referrer's referrer gets 2% of the base points or the equivalant of their deposit amount in points, whichever is less
+      address grandReferrer = getReferrer(referrer);
+      if (grandReferrer != address(0)) {
+        uint128 grandReferrerPointsCap = uint128(getAmountDeposited(grandReferrer));
+        uint128 grandReferrerPossiblePoints = uint128(value / 50);
+        addresses[2] = grandReferrer;
+        points[2] = grandReferrerPossiblePoints < grandReferrerPointsCap ? grandReferrerPossiblePoints : grandReferrerPointsCap;
+      }
+    }
+
+    return (addresses, points);
   }
 
   function commitToBlock() public {

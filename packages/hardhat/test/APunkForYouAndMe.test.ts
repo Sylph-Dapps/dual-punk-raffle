@@ -17,6 +17,12 @@ const BEYOND_DEADLINE = DAY * 600; // Deadling is 30 days
 
 const NULL_ADDRESS = "0x0000000000000000000000000000000000000000";
 
+const ContributionMode = {
+  Allowlist: 0,
+  Projects: 1,
+  Basic: 2,
+  Referrals: 3
+};
 
 function loadWalletsFromFile(filePath: string, numWalletsToLoad: any = undefined) {
   const privateKeys = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
@@ -108,16 +114,11 @@ describe("APunkForYouAndMe", function () {
     await punksReaderContract.deployed();
     await punksReaderContract.setPunksContract(punksContract.address);
 
-    const referralPointsCalculatorContractFactory = await ethers.getContractFactory("ReferralPointsCalculator");
-    calculatorContract = await referralPointsCalculatorContractFactory.deploy();
-
     const raffleContractFactory = await ethers.getContractFactory("APunkForYouAndMe");
     raffleContract = await raffleContractFactory.deploy();
     await raffleContract.deployed();
     await raffleContract.setPunksContract(punksContract.address);
-    await raffleContract.setEntryCalculator(calculatorContract.address);
-
-    await calculatorContract.setReferrerLookup(raffleContract.address);
+    await raffleContract.setContributionMode(ContributionMode.Referrals);
 
     const rewardContractFactory = await ethers.getContractFactory("AndALittleSomethingForSomeoneElse");
     rewardContract = await rewardContractFactory.deploy();
@@ -655,7 +656,7 @@ describe("APunkForYouAndMe", function () {
   });
 
   describe("commitToBlock", function() {
-    let player;
+    let player:any;
 
     before(async () => {
       player = (await ethers.getSigners())[1];
@@ -1750,17 +1751,13 @@ describe("APunkForYouAndMe - Multiple iterations", function() {
       wallets.forEach(w => winCounts[w.address] = 0);
 
       for(let i = 0; i < NUM_ITERATIONS; i++) {
-        // Deploy basic points calculator
-        const calculatorContractFactory = await ethers.getContractFactory("BasicPointsCalculator");
-        const calculatorContract = await calculatorContractFactory.deploy();
-        
         // Deploy raffle contract
         const raffleContractFactory = await ethers.getContractFactory("APunkForYouAndMe");
         const raffleContract = await raffleContractFactory.deploy();
         await raffleContract.deployed();
         await raffleContract.setPunksContract(punksContract.address);
         await raffleContract.setTargetBalance(parseEther(NUM_WALLETS.toString()));
-        await raffleContract.setEntryCalculator(calculatorContract.address);
+        await raffleContract.setContributionMode(ContributionMode.Basic);
 
         // Make raffle entries
         for(let j = 0; j < NUM_WALLETS; j++) {
@@ -1773,7 +1770,7 @@ describe("APunkForYouAndMe - Multiple iterations", function() {
         const pointsPerAddress = {};
         for(let j = 0; j < NUM_WALLETS; j++) {
           const numPoints = await raffleContract.getPointsForAddress(wallets[j].address);
-          expect(numPoints).to.equal(parseEther("2")); // BasicPointsCalculator gives 2 points per 1 wei
+          expect(numPoints).to.equal(parseEther("2")); // ContributionMode.Basic gives 2 points per 1 wei
         }
 
         // Pick winner
@@ -1805,18 +1802,13 @@ describe("APunkForYouAndMe - Multiple iterations", function() {
       wallets.forEach(w => winCounts[w.address] = 0);
 
       for(let i = 0; i < NUM_ITERATIONS; i++) {
-        const calculatorContractFactory = await ethers.getContractFactory("ReferralPointsCalculator");
-        const calculatorContract = await calculatorContractFactory.deploy();
-        
         // Deploy raffle contract
         const raffleContractFactory = await ethers.getContractFactory("APunkForYouAndMe");
         const raffleContract = await raffleContractFactory.deploy();
         await raffleContract.deployed();
         await raffleContract.setPunksContract(punksContract.address);
         await raffleContract.setTargetBalance(parseEther("14"));
-        await raffleContract.setEntryCalculator(calculatorContract.address);
-
-        await calculatorContract.setReferrerLookup(raffleContract.address);
+        await raffleContract.setContributionMode(ContributionMode.Referrals);
 
         // Make raffle entries
         for(let j = 0; j < NUM_WALLETS; j++) {
